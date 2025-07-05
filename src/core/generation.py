@@ -17,6 +17,7 @@ Key Features:
 """
 
 import os
+import gc
 import torch
 import time
 from torchvision.transforms import Compose, Lambda, Normalize
@@ -28,6 +29,7 @@ from src.optimization.performance import (
     optimized_video_rearrange, optimized_single_video_rearrange, 
     optimized_sample_to_image_format, temporal_latent_blending
 )
+from src.optimization.blockswap import BlockSwapDebugger
 from src.common.seed import set_seed
 try:
     import comfy.model_management
@@ -120,14 +122,19 @@ def generation_step(runner, text_embeds_dict, preserve_vram, cond_latents, tempo
     conditions = [condition]
     t = time.time()
     
+    # Check if BlockSwap is active
+    use_blockswap = hasattr(runner, "_blockswap_active") and runner._blockswap_active
+
     # Use adaptive autocast for optimal performance
     with torch.no_grad():
         with torch.autocast("cuda", autocast_dtype, enabled=True):
             video_tensors = runner.inference(
                 noises=noises,
                 conditions=conditions,
-                preserve_vram=preserve_vram,  # Memory offload optimization
+                preserve_vram=preserve_vram  # Memory offload optimization
+                and not use_blockswap,  # Disable dit_offload if BlockSwap active
                 temporal_overlap=temporal_overlap,
+                use_blockswap=use_blockswap,
                 **text_embeds_dict,
             )
     
@@ -175,7 +182,7 @@ def cut_videos(videos):
     return result
 
 
-def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_size=90, preserve_vram=False, temporal_overlap=0, debug=False, progress_callback=None):
+def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_size=90, preserve_vram=False, temporal_overlap=0, debug=False, block_swap_config=None, progress_callback=None):
     """
     Main generation loop with context-aware temporal processing
     
@@ -188,6 +195,8 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
         batch_size (int): Batch size for processing
         preserve_vram (str/bool): VRAM preservation mode
         temporal_overlap (int): Frames for temporal continuity
+        debug (bool): Debug mode
+        block_swap_config (dict): Optional BlockSwap configuration
         progress_callback (callable): Optional callback for progress reporting
         
     Returns:
@@ -202,7 +211,13 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
         - Real-time progress reporting
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
+    # Log BlockSwap status
+    if block_swap_config:
+        blocks_to_swap = block_swap_config.get("blocks_to_swap", 0)
+        if blocks_to_swap > 0:
+            print(f"🔄 Generation starting with BlockSwap: {blocks_to_swap} blocks")
+
     # Adaptive model dtype detection for maximum performance
     model_dtype = None
     try:
@@ -420,15 +435,53 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
             #clear_vram_cache()
 
     finally:
-        # Final cleanup of embeddings
+        # Initializing BlockSwapDebugger logging
+        enable_debug = block_swap_config.get("enable_debug", False) if block_swap_config else False
+        debugger = BlockSwapDebugger(enabled=enable_debug)
+        # Log memory state before cleanup
+        debugger.log_memory_state(
+            "Generation complete - Before cleanup", show_tensors=True
+        )
+        debugger.log("🧹 VRAM cleanup")
+
+        # Move models to CPU
         text_pos_embeds = text_pos_embeds.to("cpu")
         text_neg_embeds = text_neg_embeds.to("cpu")
         runner.dit.to("cpu")
         runner.vae.to("cpu")
+        
+        # Clear runner cache
+        if hasattr(runner, "cache") and hasattr(runner.cache, "cache"):
+            # Move cached tensors to CPU before clearing
+            for value in runner.cache.cache.values():
+                if torch.is_tensor(value) and value.is_cuda:
+                    value.data = value.data.cpu()
+                elif isinstance(value, (list, tuple)):
+                    for item in value:
+                        if torch.is_tensor(item) and item.is_cuda:
+                            item.data = item.data.cpu()
+            runner.cache.cache.clear()
+        
+        # Find and clear any remaining GPU tensors
+        for obj in gc.get_objects():
+            try:
+                if torch.is_tensor(obj) and obj.is_cuda:
+                    obj.data = torch.empty(0, device=obj.device)
+            except:
+                pass
+        
+        # Force cleanup
+        gc.collect()
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
         #del text_pos_embeds, text_neg_embeds
         #clear_vram_cache()
-    
+
+        # Log final memory state
+        debugger.log_memory_state(
+            "After cleanup", show_tensors=True
+        )
     
     # OPTIMISATION ULTIME : Pré-allocation et copie directe (évite les torch.cat multiples)
     print(f"💾 Processing {len(batch_samples)} batch_samples with memory-optimized pre-allocation")

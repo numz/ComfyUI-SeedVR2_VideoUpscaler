@@ -290,6 +290,7 @@ class VideoDiffusionInfer():
         cfg_scale: Optional[float] = None,
         preserve_vram: bool = False,
         temporal_overlap: int = 0,
+        use_blockswap: bool = False,
     ) -> List[Tensor]:
         assert len(noises) == len(conditions) == len(texts_pos) == len(texts_neg)
         batch_size = len(noises)
@@ -363,10 +364,15 @@ class VideoDiffusionInfer():
                 self.vae = self.vae.to("cpu")
                 if self.debug:
                     print(f"🔄 VAE to CPU time: {time.time() - t} seconds")
-            t = time.time()
-            self.dit = self.dit.to(get_device())
-            if self.debug:
-                print(f"🔄 Dit to GPU time: {time.time() - t} seconds")
+            # Before sampling, check if BlockSwap is active
+            if not use_blockswap and not hasattr(self, "_blockswap_active"):
+                t = time.time()
+                self.dit = self.dit.to(get_device())
+                if self.debug:
+                    print(f"🔄 Dit to GPU time: {time.time() - t} seconds")
+            else:
+                # BlockSwap manages device placement
+                pass
 
         t = time.time()
         

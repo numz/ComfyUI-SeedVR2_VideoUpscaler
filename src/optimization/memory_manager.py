@@ -231,7 +231,19 @@ def fast_model_cleanup(model):
             if buffer is not None:
                 buffer.data = buffer.data.cpu()
     
+    # Deallocate the memory
+    def deallocate_recursive(m):
+        for child in m.children():
+            deallocate_recursive(child)
+        for param in m.parameters():
+            if param is not None:
+                param.data = torch.empty(0)
+        for buffer in m.buffers():
+            if buffer is not None:
+                buffer.data = torch.empty(0)
+    
     clear_recursive(model)
+    deallocate_recursive(model)
 
 
 def fast_ram_cleanup():
