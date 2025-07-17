@@ -1,5 +1,5 @@
 einops                   # Tensor operations
-omegaconf==2.3.0                # Configuration system.
+omegaconf>=2.3.0                # Configuration system.
 diffusers               # Diffusers
 pytorch-extension #pytorch extension
 rotary_embedding_torch
