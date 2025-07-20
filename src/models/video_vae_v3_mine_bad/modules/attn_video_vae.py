@@ -22,7 +22,7 @@ from diffusers.models.downsampling import Downsample2D
 from diffusers.models.lora import LoRACompatibleConv
 from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from diffusers.models.resnet import ResnetBlock2D
-from diffusers.models.unets.unet_2d_blocks import DownEncoderBlock2D, UpDecoderBlock2D
+from diffusers.models.unet_2d_blocks import DownEncoderBlock2D, UpDecoderBlock2D
 from diffusers.models.upsampling import Upsample2D
 from diffusers.utils import is_torch_version
 from diffusers.utils.accelerate_utils import apply_forward_hook
