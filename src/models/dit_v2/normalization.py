@@ -97,12 +97,14 @@ class CustomRMSNorm(nn.Module):
         normalized = input / rms
         
         if self.elementwise_affine:
-            # 🚀 FP8 COMPATIBILITY: Convert weight to match normalized dtype
-            # This prevents "Promotion for Float8 Types is not supported" errors
-            weight = self.weight
-            if weight.dtype != normalized.dtype:
-                weight = weight.to(normalized.dtype)
-            return normalized * weight
+            # Convert FP8 weight to BFloat16 for arithmetic operations
+            if hasattr(torch, 'float8_e4m3fn'):
+                fp8_types = (torch.float8_e4m3fn, torch.float8_e5m2)
+                if self.weight.dtype in fp8_types:
+                    weight = self.weight.to(torch.bfloat16)
+                    return normalized * weight
+                    
+            return normalized * self.weight
         return normalized
 
 

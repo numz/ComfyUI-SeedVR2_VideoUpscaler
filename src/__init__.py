@@ -37,11 +37,16 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 '''
 # Progressive import system with fallback
+# ===== MODULE 0: Constants =====
+if MODULES_AVAILABLE['downloads']:
+    from src.utils.constants import (
+        get_base_cache_dir,
+    )
+
 # ===== MODULE 1: Downloads =====
 if MODULES_AVAILABLE['downloads']:
     from src.utils.downloads import (
         download_weight,
-        get_base_cache_dir
     )
     
 
@@ -70,8 +75,6 @@ if MODULES_AVAILABLE['performance']:
 if MODULES_AVAILABLE['compatibility']:
     from src.optimization.compatibility import (
         FP8CompatibleDiT,
-        apply_fp8_compatibility_hooks,
-        remove_compatibility_hooks,
     )
     
 
@@ -113,8 +116,11 @@ if MODULES_AVAILABLE['comfyui_node']:
 
 # Export all available functions
 __all__ = [
+    # Constants
+    'get_base_cache_dir',
+
     # Utils
-    'download_weight', 'get_base_cache_dir',
+    'download_weight', 
     
     # Memory Management
     'get_vram_usage', 'clear_vram_cache', 'reset_vram_peak', 
@@ -126,7 +132,7 @@ __all__ = [
     'validate_video_format', 'ensure_4n_plus_1_format', 'calculate_padding_requirements', 'apply_wavelet_reconstruction', 'temporal_consistency_check',
     
     # Compatibility
-    'FP8CompatibleDiT', 'apply_fp8_compatibility_hooks', 'remove_compatibility_hooks',
+    'FP8CompatibleDiT',
     
     # Core Model & Generation & Infer
     'configure_runner', 'load_quantized_state_dict', 'configure_dit_model_inference', 'configure_vae_model_inference',

@@ -86,6 +86,13 @@ class CustomRMSNorm(nn.Module):
         normalized = input / rms
         
         if self.elementwise_affine:
+            # Convert FP8 weight to BFloat16 for arithmetic operations
+            if hasattr(torch, 'float8_e4m3fn'):
+                fp8_types = (torch.float8_e4m3fn, torch.float8_e5m2)
+                if self.weight.dtype in fp8_types:
+                    weight = self.weight.to(torch.bfloat16)
+                    return normalized * weight
+                    
             return normalized * self.weight
         return normalized
 

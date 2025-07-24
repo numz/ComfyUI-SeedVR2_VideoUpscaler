@@ -1,73 +1,60 @@
 """
 Downloads utility module for SeedVR2
-Handles model and VAE downloads from HuggingFace
-
-Extracted from: seedvr2.py (line 968-1015)
+Handles model and VAE downloads from HuggingFace repositories
 """
 
 import os
+import urllib.error
+from typing import Optional
 from torchvision.datasets.utils import download_url
-try:
-    import folder_paths
-    # Configuration des chemins
-    base_cache_dir = os.path.join(folder_paths.models_dir, "SEEDVR2")
 
-    # S'assurer que le dossier de cache existe
-    folder_paths.add_model_folder_path("seedvr2", os.path.join(folder_paths.models_dir, "SEEDVR2"))
-except:
-    base_cache_dir = "./seedvr2_models"
+from src.utils.model_registry import MODEL_REGISTRY, get_model_repo, DEFAULT_VAE
+from src.utils.constants import get_base_cache_dir
 
-def download_weight(model, model_dir=None):
+# HuggingFace URL template
+HUGGINGFACE_BASE_URL = "https://huggingface.co/{repo}/resolve/main/{filename}"
+
+def download_weight(model: str, model_dir: Optional[str] = None) -> None:
     """
-    Télécharge un modèle SeedVR2 et son VAE associé depuis HuggingFace Hub
+    Download a SeedVR2 model and its associated VAE from HuggingFace Hub
     
     Args:
-        model (str): Nom du fichier modèle à télécharger
-                    (ex: "seedvr2_ema_3b_fp16.safetensors")
-    
-    Gère automatiquement:
-    - Téléchargement du modèle principal
-    - Téléchargement du VAE avec fallbacks:
-      1. ema_vae_fp16.safetensors (priorité)
-      2. ema_vae_fp8_e4m3fn.safetensors (fallback)  
-      3. ema_vae.pth (legacy fallback)
+        model: Model filename to download
+        model_dir: Optional custom directory for models
     """
-    if model_dir is None:
-        model_path = os.path.join(base_cache_dir, model)
-        vae_fp16_path = os.path.join(base_cache_dir, "ema_vae_fp16.safetensors")
-        cache_dir = base_cache_dir
-    else:
-        model_path = os.path.join(model_dir, model)
-        vae_fp16_path = os.path.join(model_dir, "ema_vae_fp16.safetensors")
-        cache_dir = model_dir
-   
-    # Configuration HuggingFace
-    repo_id = "numz/SeedVR2_comfyUI"
-    base_url = f"https://huggingface.co/{repo_id}/resolve/main"
+    # Setup paths
+    cache_dir = model_dir or get_base_cache_dir()
+    model_path = os.path.join(cache_dir, model)
+    vae_path = os.path.join(cache_dir, DEFAULT_VAE)
     
-    # 🚀 Téléchargement du modèle principal
+    # Download model if not exists
     if not os.path.exists(model_path):
-        print(f"📥 Downloading model: {model}")
-        download_url(f"{base_url}/{model}", cache_dir, filename=model)
-        print(f"✅ Downloaded: {model}")
-    
-    # 🚀 Téléchargement du VAE avec stratégie de fallback
-    if not os.path.exists(vae_fp16_path):
-        print("📥 Downloading FP16 VAE SafeTensors...")
+        repo = get_model_repo(model)
+        url = HUGGINGFACE_BASE_URL.format(repo=repo, filename=model)
+        
+        print(f"📥 Downloading {model} from HF {repo}...")
         try:
-            download_url(f"{base_url}/ema_vae_fp16.safetensors", cache_dir, filename="ema_vae_fp16.safetensors")
-            print("✅ Downloaded: ema_vae_fp16.safetensors (FP16 SafeTensors)")
-        except Exception as e:
-            print(f"⚠️ FP16 SafeTensors VAE not available: {e}")
+            download_url(url, cache_dir, filename=model)
+            print(f"✅ Downloaded: {model}")
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            print(f"❌ Model download failed: {e}")
+            print(f"📎 Please download model manually from: https://huggingface.co/{repo}")
+            print(f"   and place it in: {cache_dir}")
+            return False
     
-    return
-
-
-def get_base_cache_dir():
-    """
-    Retourne le répertoire de cache base pour les modèles SeedVR2
+    # Download VAE if not exists
+    if not os.path.exists(vae_path):
+        vae_repo = get_model_repo(DEFAULT_VAE)
+        vae_url = HUGGINGFACE_BASE_URL.format(repo=vae_repo, filename=DEFAULT_VAE)
+        
+        print(f"📥 Downloading VAE: {DEFAULT_VAE} from HF {vae_repo}...")
+        try:
+            download_url(vae_url, cache_dir, filename=DEFAULT_VAE)
+            print(f"✅ Downloaded: {DEFAULT_VAE}")
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            print(f"❌ VAE download failed: {e}")
+            print(f"📎 Please download VAE manually from: https://huggingface.co/{vae_repo}")
+            print(f"   and place it in: {cache_dir}")
+            return False
     
-    Returns:
-        str: Chemin du répertoire de cache
-    """
-    return base_cache_dir
+    return True

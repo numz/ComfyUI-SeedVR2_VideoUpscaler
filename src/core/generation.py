@@ -20,6 +20,7 @@ import os
 import gc
 import torch
 import time
+from src.utils.constants import get_script_directory
 from torchvision.transforms import Compose, Lambda, Normalize
 
 
@@ -37,7 +38,7 @@ except:
     COMFYUI_AVAILABLE = False
     pass
 # Get script directory for embeddings
-script_directory = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+script_directory = get_script_directory()
 
 # Import transforms and color fix
 

@@ -306,23 +306,15 @@ class VideoDiffusionInfer():
         if cfg_scale is None:
             cfg_scale = self.config.diffusion.cfg.scale
 
-        # 🚀 OPTIMISATION: Détecter le dtype du modèle pour performance optimale
-        model_dtype = next(self.dit.parameters()).dtype
+        # 🚀 OPTIMISATION: Use BFloat16 autocast for all models
+        # - FP8 models: BFloat16 required for arithmetic operations
+        # - FP16 models: BFloat16 provides better numerical stability and prevents black frames
+        # - BFloat16 models: Already optimal
+        target_dtype = torch.bfloat16
+
         if self.debug:
-            print(f"🎯 model_dtype: {model_dtype}")
-        # Adapter les dtypes selon le modèle
-        if model_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-            # FP8 natif: utiliser BFloat16 pour les calculs intermédiaires (compatible)
-            target_dtype = torch.float16
-            #print(f"🚀 FP8 model detected: using BFloat16 for intermediate calculations")
-        elif model_dtype == torch.float16:
-            target_dtype = torch.bfloat16
-            #print(f"🎯 FP16 model: using FP16 pipeline")
-        else:
-            target_dtype = torch.bfloat16
-            #print(f"🎯 BFloat16 model: using BFloat16 pipeline")
-        if self.debug:
-            print(f"🎯 target_dtype: {target_dtype}")
+            model_dtype = next(self.dit.parameters()).dtype
+            print(f"🎯 Model dtype: {model_dtype}, using {target_dtype} for autocast")
         # Text embeddings.
         assert type(texts_pos[0]) is type(texts_neg[0])
         if isinstance(texts_pos[0], str):

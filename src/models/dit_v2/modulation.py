@@ -92,25 +92,26 @@ class AdaSingle(nn.Module):
             getattr(self, f"{layer}_gate", None),
         )
 
-        # 🚀 FP8 COMPATIBILITY: Convert parameters to match embedding dtype
-        # This prevents "Promotion for Float8 Types is not supported" errors
-        target_dtype = shiftA.dtype
-        
+        # Handle potential FP8 parameters - convert to computation dtype
+        if hasattr(torch, 'float8_e4m3fn'):
+            fp8_types = (torch.float8_e4m3fn, torch.float8_e5m2)
+            
+            # Convert FP8 parameters to BFloat16 for arithmetic operations
+            if shiftB is not None and shiftB.dtype in fp8_types:
+                shiftB = shiftB.to(torch.bfloat16)
+            if scaleB is not None and scaleB.dtype in fp8_types:
+                scaleB = scaleB.to(torch.bfloat16)
+            if gateB is not None and gateB.dtype in fp8_types:
+                gateB = gateB.to(torch.bfloat16)
+
         if mode == "in":
-            # Convert parameters to match embedding dtype for FP8 compatibility
-            if scaleB is not None and scaleB.dtype != target_dtype:
-                scaleB = scaleB.to(target_dtype)
-            if shiftB is not None and shiftB.dtype != target_dtype:
-                shiftB = shiftB.to(target_dtype)
-            
             return hid.mul_(scaleA + scaleB).add_(shiftA + shiftB)
-            
         if mode == "out":
-            # Convert gate parameter to match embedding dtype for FP8 compatibility
-            if gateB is not None and gateB.dtype != target_dtype:
-                gateB = gateB.to(target_dtype)
-            
-            return hid.mul_(gateA + gateB)
+            if gateB is not None:
+                return hid.mul_(gateA + gateB)
+            else:
+                # If no gate parameter, just use the embedding gate
+                return hid.mul_(gateA)
             
         raise NotImplementedError
 

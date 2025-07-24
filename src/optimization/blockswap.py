@@ -21,6 +21,7 @@ import gc
 import comfy.model_management as mm
 from typing import Dict, Any, List, Tuple, Optional, Union
 from src.optimization.memory_manager import get_vram_usage
+from src.optimization.compatibility import call_rope_with_stability
 
 
 
@@ -467,66 +468,87 @@ def _patch_rope_for_blockswap(model, debugger: BlockSwapDebugger) -> None:
     """
     Patch RoPE modules to handle device mismatches gracefully.
     
-    RoPE (Rotary Position Embeddings) can cause device mismatches when
-    blocks are on different devices. This patches the get_axial_freqs
-    method to handle these cases robustly.
+    This complements the stability wrapper from compatibility.py by adding
+    device-aware error handling. Only handles device/memory errors, letting
+    other exceptions bubble up to the stability wrapper if present.
     """
     rope_patches = []
     
     for name, module in model.named_modules():
         if "rope" in name.lower() and hasattr(module, "get_axial_freqs"):
-            original_method = module.get_axial_freqs
+            # Skip if already wrapped by blockswap
+            if hasattr(module, '_blockswap_wrapped') and module._blockswap_wrapped:
+                continue
             
-            def robust_rope_wrapper(self, *args, **kwargs):
-                try:
-                    return original_method(*args, **kwargs)
-                except (RuntimeError, KeyError) as e:
-                    error_msg = str(e).lower()
-                    if "device" in error_msg or "memory" in error_msg or "allocation" in error_msg:
-                        debugger.log(f"RoPE issue for {name}: {e}")
-                        
-                        # Get current device from parameters
-                        current_device = "cuda"
-                        if list(self.parameters()):
-                            current_device = next(self.parameters()).device
-                        
-                        # Try with cleared cache first
-                        if hasattr(original_method, 'cache_clear'):
-                            original_method.cache_clear()
+            # Get current method (might be stability-wrapped)
+            current_method = module.get_axial_freqs
+            
+            # Create device-aware wrapper with proper closure handling
+            def make_device_aware_wrapper(module_name, current_fn):
+                def device_aware_rope_wrapper(self, *args, **kwargs):
+                    try:
+                        # Try current method (original or stability-wrapped)
+                        return current_fn(*args, **kwargs)
+                    except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+                        error_msg = str(e).lower()
+                        # Only handle device/memory specific errors
+                        if any(x in error_msg for x in ["device", "memory", "allocation"]):
+                            debugger.log(f"RoPE device issue for {module_name}: {e}")
+                            
+                            # Get current device from parameters
+                            current_device = next(self.parameters()).device if list(self.parameters()) else torch.device("cuda")
+                            
+                            # Try clearing cache first (non-invasive fix)
+                            if hasattr(current_fn, 'cache_clear'):
+                                current_fn.cache_clear()
+                                try:
+                                    return current_fn(*args, **kwargs)
+                                except:
+                                    pass
+                            
+                            # Fallback to CPU computation with stability
+                            debugger.log(f"RoPE fallback to CPU for {module_name}")
+                            self.cpu()
+                            
                             try:
-                                return original_method(*args, **kwargs)
-                            except:
-                                pass
-                        
-                        # Fallback to CPU computation
-                        debugger.log(f"RoPE fallback to CPU for {name}")
-                        self.cpu()
-                        
-                        try:
-                            result = original_method(*args, **kwargs)
-                            
-                            # Move module back to original device
-                            self.to(current_device)
-                            
-                            # Move result to appropriate device if it's a tensor
-                            if hasattr(result, 'to'):
-                                if len(args) > 0 and hasattr(args[0], 'device'):
-                                    return result.to(args[0].device)
-                                return result.to(current_device)
-                            return result
-                        except Exception as cpu_error:
-                            # Always restore device even on error
-                            self.to(current_device)
-                            raise cpu_error
-                    else:
-                        raise
+                                # Use call_rope_with_stability for CPU computation
+                                # This ensures cache is cleared and autocast disabled
+                                original_fn = getattr(self, '_original_get_axial_freqs', current_fn)
+                                result = call_rope_with_stability(original_fn, *args, **kwargs)
+                                
+                                # Move module back to original device
+                                self.to(current_device)
+                                
+                                # Move result to appropriate device if it's a tensor
+                                if hasattr(result, 'to'):
+                                    target_device = args[0].device if len(args) > 0 and hasattr(args[0], 'device') else current_device
+                                    return result.to(target_device)
+                                return result
+                                
+                            except Exception as cpu_error:
+                                # Always restore device even on error
+                                self.to(current_device)
+                                raise cpu_error
+                        else:
+                            # Not a device error, let it bubble up
+                            raise
+                
+                return device_aware_rope_wrapper
             
-            module.get_axial_freqs = types.MethodType(robust_rope_wrapper, module)
+            # Apply wrapper
+            module.get_axial_freqs = types.MethodType(
+                make_device_aware_wrapper(name, current_method), 
+                module
+            )
+            module._blockswap_wrapped = True
+            
+            # Store for cleanup (use original or previously stored)
+            original_method = getattr(module, '_original_get_axial_freqs', current_method)
             rope_patches.append((module, original_method))
     
     if rope_patches:
         model._rope_patches = rope_patches
-        debugger.log(f"✅ Patched {len(rope_patches)} RoPE modules with robust device handling")
+        debugger.log(f"✅ Patched {len(rope_patches)} RoPE modules with device handling")
 
 
 def _protect_model_from_move(model, runner, debugger: BlockSwapDebugger) -> None:
@@ -648,6 +670,11 @@ def cleanup_blockswap(runner, keep_state_for_cache: bool = False) -> None:
             if hasattr(module.get_axial_freqs, 'cache_clear'):
                 module.get_axial_freqs.cache_clear()
             module.get_axial_freqs = original_method
+            # Clean up wrapper attributes
+            if hasattr(module, '_rope_wrapped'):
+                delattr(module, '_rope_wrapped')
+            if hasattr(module, '_original_get_axial_freqs'):
+                delattr(module, '_original_get_axial_freqs')
         debugger.log(f"✅ Restored {len(model._rope_patches)} RoPE modules")
         delattr(model, '_rope_patches')
     else:
@@ -723,13 +750,3 @@ def cleanup_blockswap(runner, keep_state_for_cache: bool = False) -> None:
 
     # Final memory cleanup
     mm.soft_empty_cache()
-
-
-
-
-
-
-
-
-
-

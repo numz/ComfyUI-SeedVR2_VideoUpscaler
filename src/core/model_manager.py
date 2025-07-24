@@ -18,6 +18,7 @@ Key Features:
 import os
 import time
 import torch
+from src.utils.constants import get_script_directory
 from omegaconf import DictConfig, OmegaConf
 
 # Import SafeTensors with fallback
@@ -36,7 +37,7 @@ from src.core.infer import VideoDiffusionInfer
 from src.optimization.blockswap import apply_block_swap_to_dit
 
 # Get script directory for config paths
-script_directory = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+script_directory = get_script_directory()
 
 
 def configure_runner(model, base_cache_dir, preserve_vram=False, debug=False, block_swap_config=None, cached_runner=None):
