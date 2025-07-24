@@ -31,9 +31,13 @@ def get_basic_vram_info():
         "total_gb": total_gb
     }
 
-# Utilisation
+# Initial VRAM check at module load
 vram_info = get_basic_vram_info()
-print(f"VRAM libre: {vram_info['free_gb']:.2f} GB")
+if "error" not in vram_info:
+    print(f"📊 Initial VRAM status: {vram_info['free_gb']:.2f}GB free / {vram_info['total_gb']:.2f}GB total")
+else:
+    print(f"⚠️ VRAM check: {vram_info['error']} - SeedVR2 requires an NVIDIA GPU")
+
 
 def get_vram_usage() -> Tuple[float, float, float]:
     """
