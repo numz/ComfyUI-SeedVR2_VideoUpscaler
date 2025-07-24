@@ -1,12 +1,12 @@
 """
 Downloads utility module for SeedVR2
-Handles model and VAE downloads from HuggingFace Hub
+Handles model and VAE downloads from HuggingFace
 
 Extracted from: seedvr2.py (line 968-1015)
 """
 
 import os
-from huggingface_hub import hf_hub_download
+from torchvision.datasets.utils import download_url
 try:
     import folder_paths
     # Configuration des chemins
@@ -35,28 +35,27 @@ def download_weight(model, model_dir=None):
     if model_dir is None:
         model_path = os.path.join(base_cache_dir, model)
         vae_fp16_path = os.path.join(base_cache_dir, "ema_vae_fp16.safetensors")
+        cache_dir = base_cache_dir
     else:
         model_path = os.path.join(model_dir, model)
         vae_fp16_path = os.path.join(model_dir, "ema_vae_fp16.safetensors")
+        cache_dir = model_dir
    
     # Configuration HuggingFace
     repo_id = "numz/SeedVR2_comfyUI"
+    base_url = f"https://huggingface.co/{repo_id}/resolve/main"
     
     # 🚀 Téléchargement du modèle principal
     if not os.path.exists(model_path):
         print(f"📥 Downloading model: {model}")
-        hf_hub_download(repo_id=repo_id, filename=model, local_dir=base_cache_dir)
+        download_url(f"{base_url}/{model}", cache_dir, filename=model)
         print(f"✅ Downloaded: {model}")
     
     # 🚀 Téléchargement du VAE avec stratégie de fallback
     if not os.path.exists(vae_fp16_path):
         print("📥 Downloading FP16 VAE SafeTensors...")
         try:
-            hf_hub_download(
-                repo_id=repo_id, 
-                filename="ema_vae_fp16.safetensors", 
-                local_dir=base_cache_dir
-            )
+            download_url(f"{base_url}/ema_vae_fp16.safetensors", cache_dir, filename="ema_vae_fp16.safetensors")
             print("✅ Downloaded: ema_vae_fp16.safetensors (FP16 SafeTensors)")
         except Exception as e:
             print(f"⚠️ FP16 SafeTensors VAE not available: {e}")

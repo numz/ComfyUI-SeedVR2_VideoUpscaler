@@ -69,7 +69,7 @@ class SeedVR2:
                 "seed": ("INT", {
                     "default": 100, 
                     "min": 0, 
-                    "max": 5000, 
+                    "max": 2**32 - 1, 
                     "step": 1,
                     "tooltip": "Random seed for generation reproducibility"
                 }),
