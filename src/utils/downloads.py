@@ -14,14 +14,15 @@ from src.utils.constants import get_base_cache_dir
 # HuggingFace URL template
 HUGGINGFACE_BASE_URL = "https://huggingface.co/{repo}/resolve/main/{filename}"
 
-def download_weight(model: str, model_dir: Optional[str] = None) -> None:
+def download_weight(model: str, model_dir: Optional[str] = None, debug=None) -> bool:
     """
     Download a SeedVR2 model and its associated VAE from HuggingFace Hub
     
     Args:
         model: Model filename to download
         model_dir: Optional custom directory for models
-    """
+        debug: Optional Debug instance for logging
+    """    
     # Setup paths
     cache_dir = model_dir or get_base_cache_dir()
     model_path = os.path.join(cache_dir, model)
@@ -32,14 +33,17 @@ def download_weight(model: str, model_dir: Optional[str] = None) -> None:
         repo = get_model_repo(model)
         url = HUGGINGFACE_BASE_URL.format(repo=repo, filename=model)
         
-        print(f"📥 Downloading {model} from HF {repo}...")
+        if debug:
+            debug.log(f"Downloading {model} from HF {repo}...", category="download", force=True)
         try:
             download_url(url, cache_dir, filename=model)
-            print(f"✅ Downloaded: {model}")
+            if debug:
+                debug.log(f"Downloaded: {model}", category="success", force=True)
         except (urllib.error.HTTPError, urllib.error.URLError) as e:
-            print(f"❌ Model download failed: {e}")
-            print(f"📎 Please download model manually from: https://huggingface.co/{repo}")
-            print(f"   and place it in: {cache_dir}")
+            if debug:
+                debug.log(f"Model download failed: {e}", level="ERROR", category="download", force=True)
+                debug.log(f"Please download model manually from: https://huggingface.co/{repo}", category="info", force=True)
+                debug.log(f"and place it in: {cache_dir}", category="info", force=True)
             return False
     
     # Download VAE if not exists
@@ -47,14 +51,17 @@ def download_weight(model: str, model_dir: Optional[str] = None) -> None:
         vae_repo = get_model_repo(DEFAULT_VAE)
         vae_url = HUGGINGFACE_BASE_URL.format(repo=vae_repo, filename=DEFAULT_VAE)
         
-        print(f"📥 Downloading VAE: {DEFAULT_VAE} from HF {vae_repo}...")
+        if debug:
+            debug.log(f"Downloading VAE: {DEFAULT_VAE} from HF {vae_repo}...", category="download", force=True)
         try:
             download_url(vae_url, cache_dir, filename=DEFAULT_VAE)
-            print(f"✅ Downloaded: {DEFAULT_VAE}")
+            if debug:
+                debug.log(f"Downloaded: {DEFAULT_VAE}", category="success", force=True)
         except (urllib.error.HTTPError, urllib.error.URLError) as e:
-            print(f"❌ VAE download failed: {e}")
-            print(f"📎 Please download VAE manually from: https://huggingface.co/{vae_repo}")
-            print(f"   and place it in: {cache_dir}")
+            if debug:
+                debug.log(f"VAE download failed: {e}", level="ERROR", category="download", force=True)
+                debug.log(f"Please download VAE manually from: https://huggingface.co/{vae_repo}", category="info", force=True)
+                debug.log(f"and place it in: {cache_dir}", category="info", force=True)
             return False
     
     return True

@@ -55,7 +55,6 @@ from .types import (
 
 logger = get_logger(__name__)  # pylint: disable=invalid-name
 
-
 class Upsample3D(Upsample2D):
     """A 3D upsampling layer with an optional convolution."""
 
@@ -299,6 +298,7 @@ class ResnetBlock3D(ResnetBlock2D):
                 inflation_mode=inflation_mode,
             )
 
+
     def forward(
         self, input_tensor, temb, memory_state: MemoryState = MemoryState.DISABLED, preserve_vram: bool = False, **kwargs
     ):
@@ -309,7 +309,8 @@ class ResnetBlock3D(ResnetBlock2D):
         try:
             hidden_states = self.nonlinearity(hidden_states)
         except Exception as e:
-            print("OOM second chance")
+            if hasattr(self, 'debug') and self.debug:
+                self.debug.log("OOM second chance: ResnetBlock3D", category="warning", force=True)
             torch.cuda.empty_cache()
             time.sleep(1)
             hidden_states = self.nonlinearity(hidden_states)

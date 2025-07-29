@@ -57,7 +57,6 @@ if MODULES_AVAILABLE['memory_manager']:
         clear_vram_cache,
         reset_vram_peak,
         preinitialize_rope_cache,
-        clear_rope_cache,
     )
     
 
@@ -124,7 +123,7 @@ __all__ = [
     
     # Memory Management
     'get_vram_usage', 'clear_vram_cache', 'reset_vram_peak', 
-    'preinitialize_rope_cache', 'clear_rope_cache', 
+    'preinitialize_rope_cache', 
     
     # Performance & Video Processing
     'optimized_video_rearrange', 'optimized_single_video_rearrange', 'optimized_sample_to_image_format',

@@ -101,13 +101,13 @@ def wavelet_decomposition(image: Tensor, levels=5):
 
 
 
-def wavelet_reconstruction(content_feat:Tensor, style_feat:Tensor):
+def wavelet_reconstruction(content_feat:Tensor, style_feat:Tensor, debug):
     """
     Apply wavelet decomposition, so that the content will have the same color as the style.
     """
     # Vérifier et ajuster les dimensions si nécessaire
     if content_feat.shape != style_feat.shape:
-        print(f"⚠️ Dimension mismatch détectée: content {content_feat.shape} vs style {style_feat.shape}")
+        debug.log(f"Dimension mismatch detected: content {content_feat.shape} vs style {style_feat.shape}", category="warning", force=True)
         
         # Redimensionner style_feat pour correspondre à content_feat
         target_shape = content_feat.shape
@@ -119,7 +119,7 @@ def wavelet_reconstruction(content_feat:Tensor, style_feat:Tensor):
                 mode='bilinear', 
                 align_corners=False
             )
-            print(f"✅ Style redimensionné vers: {style_feat.shape}")
+            debug.log(f"Style resized to: {style_feat.shape}", category="info", force=True)
     
     # calculate the wavelet decomposition of the content feature
     content_high_freq, content_low_freq = wavelet_decomposition(content_feat)
@@ -130,7 +130,7 @@ def wavelet_reconstruction(content_feat:Tensor, style_feat:Tensor):
     
     # Vérification finale avant addition
     if content_high_freq.shape != style_low_freq.shape:
-        print(f"⚠️ Ajustement final nécessaire: {content_high_freq.shape} vs {style_low_freq.shape}")
+        debug.log(f"Final adjustment needed: {content_high_freq.shape} vs {style_low_freq.shape}", category="warning", force=True)
         style_low_freq = safe_interpolate_operation(
             style_low_freq,
             size=content_high_freq.shape[-2:],

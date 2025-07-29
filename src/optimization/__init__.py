@@ -9,7 +9,6 @@ from .memory_manager import (
     clear_vram_cache, 
     reset_vram_peak,
     preinitialize_rope_cache,
-    clear_rope_cache,
 )
 
 # Performance optimization functions
@@ -31,7 +30,6 @@ __all__ = [
     "clear_vram_cache",
     "reset_vram_peak",
     "preinitialize_rope_cache",
-    "clear_rope_cache",
     
     # Performance optimization
     "optimized_video_rearrange",

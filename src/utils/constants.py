@@ -10,7 +10,8 @@ SEEDVR2_FOLDER_NAME = "SEEDVR2"  # Physical folder name on disk
 SEEDVR2_MODEL_TYPE = "seedvr2"   # Model type identifier for ComfyUI
 
 # Supported model file formats
-SUPPORTED_MODEL_EXTENSIONS = {'.safetensors', '.gguf'}
+#SUPPORTED_MODEL_EXTENSIONS = {'.safetensors', '.gguf'}
+SUPPORTED_MODEL_EXTENSIONS = {'.safetensors'}
 
 def get_script_directory():
     """Get the root script directory path (3 levels up from this file)"""

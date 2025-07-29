@@ -33,9 +33,12 @@ class FP8CompatibleDiT(torch.nn.Module):
     - Flash Attention: Automatic optimization of attention layers
     """
     
-    def __init__(self, dit_model, skip_conversion=False):
+    def __init__(self, dit_model, skip_conversion=False, debug=None):
         super().__init__()
         self.dit_model = dit_model
+        if debug is None:
+            raise ValueError("Debug instance must be provided to FP8CompatibleDiT")
+        self.debug = debug if debug is not None else None
         self.model_dtype = self._detect_model_dtype()
         self.is_fp8_model = self.model_dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
         self.is_fp16_model = self.model_dtype == torch.float16
@@ -44,7 +47,8 @@ class FP8CompatibleDiT(torch.nn.Module):
         if not skip_conversion and self.is_fp8_model:
             # Only FP8 models need RoPE frequency conversion
             model_variant = "7B" if self._is_nadit_model() else "3B" if self._is_nadit_v2_model() else "Unknown"
-            print(f"🎯 Detected NaDiT {model_variant} FP8 - Converting RoPE freqs for FP8 compatibility")
+            self.debug.log(f"Detected NaDiT {model_variant} FP8 - Converting RoPE freqs for FP8 compatibility", 
+                          category="precision", force=True)
             self._convert_rope_freqs()
             
         # Apply RoPE stabilization for numerical stability
@@ -81,7 +85,7 @@ class FP8CompatibleDiT(torch.nn.Module):
                     if module.rope.freqs.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
                         module.rope.freqs.data = module.rope.freqs.to(torch.bfloat16)
                         converted += 1
-        print(f"   ✅ Converted {converted} RoPE frequency buffers")
+        self.debug.log(f"Converted {converted} RoPE frequency buffers", category="success")
 
     def _stabilize_rope_computations(self):
         """
@@ -99,7 +103,8 @@ class FP8CompatibleDiT(torch.nn.Module):
         if not hasattr(self.dit_model, 'blocks'):
             return
         
-        print(f"🎯 Stabilizing RoPE computations for numerical stability")
+        self.debug.start_timer("stabilize_rope")
+        self.debug.log(f"Stabilizing RoPE computations for numerical stability", category="precision")
         
         rope_count = 0
         
@@ -127,7 +132,9 @@ class FP8CompatibleDiT(torch.nn.Module):
                 rope_count += 1
         
         if rope_count > 0:
-            print(f"   ✅ Stabilized {rope_count} RoPE modules")
+            self.debug.log(f"Stabilized {rope_count} RoPE modules", category="success")
+        
+        self.debug.end_timer("stabilize_rope", f"Stabilized {rope_count} RoPE modules")
 
     def _apply_flash_attention_optimization(self) -> None:
         """🚀 FLASH ATTENTION OPTIMIZATION - 30-50% speedup of attention layers"""
@@ -142,7 +149,7 @@ class FP8CompatibleDiT(torch.nn.Module):
                     attention_layers_optimized += 1
         
         if not flash_attention_available:
-            print("   ℹ️ Flash Attention not available, using PyTorch SDPA as fallback")
+            self.debug.log("Flash Attention not available, using PyTorch SDPA as fallback", category="info", force=True)
     
     def _check_flash_attention_support(self) -> bool:
         """Check if Flash Attention is available"""
@@ -197,7 +204,7 @@ class FP8CompatibleDiT(torch.nn.Module):
             return True
             
         except Exception as e:
-            print(f"   ⚠️ Failed to optimize attention layer '{name}': {e}")
+            self.debug.log(f"Failed to optimize attention layer '{name}': {e}", level="WARNING", category="model")
             return False
     
     def _create_flash_attention_forward(self, module: torch.nn.Module, layer_name: str):
@@ -210,7 +217,7 @@ class FP8CompatibleDiT(torch.nn.Module):
                 return self._sdpa_attention_forward(original_forward, module, *args, **kwargs)
             except Exception as e:
                 # Fallback to original implementation
-                print(f"   ⚠️ Flash Attention failed for {layer_name}, using original: {e}")
+                self.debug.log(f"Flash Attention failed for {layer_name}, using original: {e}", level="WARNING", category="model", force=True)
                 return original_forward(*args, **kwargs)
         
         return flash_attention_forward
@@ -361,11 +368,11 @@ class FP8CompatibleDiT(torch.nn.Module):
         try:
             return self.dit_model(*args, **kwargs)
         except Exception as e:
-            print(f"❌ Forward pass error: {e}")
+            self.debug.log(f"Forward pass error: {e}", category="error", force=True)
             if self.is_fp8_model:
-                print(f"   FP8 model - converted FP8 tensors to BFloat16")
+                self.debug.log(f"FP8 model - converted FP8 tensors to BFloat16", category="info", force=True)
             else:
-                print(f"   {self.model_dtype} model - no conversion applied")
+                self.debug.log(f"{self.model_dtype} model - no conversion applied", category="info", force=True)
             raise
     
     def __getattr__(self, name):
