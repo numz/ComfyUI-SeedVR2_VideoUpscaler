@@ -34,6 +34,15 @@ Can run as **Multi-GPU standalone** too, see [🖥️ Run as Standalone](#️-ru
 
 ## 🚀 Updates
 
+**2025.01.30**
+
+- 🎯 **Unified Debug System**: New structured logging with categories, timers, and memory tracking. `enable_debug` now available on main node
+- ⚡ **Smart FP8 Optimization**: FP8 models now keep native FP8 storage, converting to BFloat16 only for arithmetic - faster and more memory efficient than FP16
+- 📦 **Model Registry**: Multi-repo support (numz/ & AInVFX/), auto-discovery of user models, added mixed FP8 variants to fix 7B artifacts
+- 💾 **Model Caching**: `cache_model` moved to main node, fixed memory leaks with proper RoPE/wrapper cleanup
+- 🧹 **Code Cleanup**: New modular structure (`constants.py`, `model_registry.py`, `debug.py`), removed legacy code
+- 🚀 **Performance**: Better memory management with `torch.cuda.ipc_collect()`, improved RoPE handling
+
 **2025.07.17**
 
 - 🛠️ Add 7B sharp Models: add 2 new 7B models with sharpen output
