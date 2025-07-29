@@ -4,6 +4,7 @@ Only includes constants actually used in the codebase
 """
 
 import os
+import folder_paths
 
 # Model folder names
 SEEDVR2_FOLDER_NAME = "SEEDVR2"  # Physical folder name on disk
@@ -20,7 +21,6 @@ def get_script_directory():
 def get_base_cache_dir():
     """Get or create the model cache directory"""
     try:
-        import folder_paths
         cache_dir = os.path.join(folder_paths.models_dir, SEEDVR2_FOLDER_NAME)
         folder_paths.add_model_folder_path(SEEDVR2_MODEL_TYPE, cache_dir)
     except:

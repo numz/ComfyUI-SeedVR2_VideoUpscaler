@@ -303,11 +303,6 @@ class SeedVR2:
         if force_ram_cleanup:
             fast_ram_cleanup()
 
-        # Clear any remaining references in the class
-        for attr in list(self.__dict__.keys()):
-            if attr not in ['__class__', '__module__', '__qualname__']:
-                setattr(self, attr, None)
-
 
     def _internal_execute(self, images, model, seed, new_resolution, cfg_scale, batch_size, 
                  preserve_vram, temporal_overlap, cache_model, block_swap_config):

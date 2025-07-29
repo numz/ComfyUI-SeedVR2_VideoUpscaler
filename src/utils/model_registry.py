@@ -6,6 +6,7 @@ Central registry for model definitions, repositories, and metadata
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from src.utils.constants import SEEDVR2_MODEL_TYPE, is_supported_model_file, get_base_cache_dir
+import folder_paths
 
 @dataclass
 class ModelInfo:
@@ -54,7 +55,6 @@ def get_available_models() -> List[str]:
     model_list = get_default_models()
     
     try:
-        import folder_paths
         # Ensure the folder is registered before trying to list files
         get_base_cache_dir()
         # Get all models from the SEEDVR2 folder using centralized constant

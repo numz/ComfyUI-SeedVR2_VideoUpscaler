@@ -17,11 +17,16 @@ import types
 import torch
 import weakref
 import gc
-import comfy.model_management as mm
 from typing import Dict, Any, List, Tuple, Optional, Union
 from src.optimization.memory_manager import get_vram_usage
 from src.optimization.compatibility import call_rope_with_stability
 
+try:
+    import comfy.model_management as mm
+    COMFYUI_AVAILABLE = True
+except:
+    COMFYUI_AVAILABLE = False
+    pass
 
 
 def get_module_memory_mb(module: torch.nn.Module) -> float:
