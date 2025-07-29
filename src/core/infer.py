@@ -195,16 +195,89 @@ class VideoDiffusionInfer():
                 # Utiliser target_dtype si fourni (évite double autocast)
                 effective_dtype = target_dtype if target_dtype is not None else dtype
                 latent = latent.to(device, effective_dtype, non_blocking=True)
+                
+                # Add bounds checking for VAE scaling to prevent overflow at high resolution
+                if torch.isnan(latent).any() or torch.isinf(latent).any():
+                    print(f"⚠️ NaN/Inf in latent before VAE scaling, batch {i}")
+                    latent = torch.nan_to_num(latent, nan=0.0, posinf=1.0, neginf=-1.0)
+                
+                # Safe scaling operation with bounds checking
                 latent = latent / scale + shift
+                
+                # Check for overflow after scaling
+                if torch.isnan(latent).any() or torch.isinf(latent).any():
+                    print(f"⚠️ NaN/Inf after VAE scaling (scale={scale}, shift={shift}), applying correction")
+                    latent = torch.nan_to_num(latent, nan=0.0, posinf=3.0, neginf=-3.0)
                 latent = rearrange(latent, "b ... c -> b c ...")
                 #latent = optimized_channels_to_second(latent)
-                latent = latent.squeeze(2)
+                #latent = latent.squeeze(2)
                 
                 # 🚀 OPTIMISATION 3: Décodage direct SANS autocast (utilise l'autocast externe)
                 #with torch.autocast("cuda", torch.float16, enabled=True):
-                sample = self.vae.decode(latent, preserve_vram).sample
+                #sample = self.vae.decode(latent, preserve_vram).sample
                 #sample = self.vae.decode(latent).sample
                 #sample = self.vae.decode(latent).sample
+                # Check tensor shape before squeeze to determine frame count
+                if self.debug:
+                    print(f"🔧 Latent shape before processing: {latent.shape}")
+                
+                # For frame-by-frame decoding, check the temporal dimension before squeeze
+                temporal_frames = latent.shape[2] if latent.ndim >= 5 else 1
+                
+                # 🚀 OPTIMISATION 3: Frame-by-frame VAE decoding to reduce VRAM spikes
+                # For GGUF models, always use frame-by-frame decoding to prevent VRAM spikes
+                if getattr(self, '_is_gguf_model', False):
+                    print(f"🔄 GGUF frame-by-frame VAE decode: {temporal_frames} frames")
+                    if temporal_frames > 1:
+                        print(f"🔧 Multi-frame input latent shape: {latent.shape}")
+                        frame_samples = []
+                        for frame_idx in range(temporal_frames):
+                            # Extract single frame from temporal dimension
+                            frame_latent = latent[:, :, frame_idx:frame_idx+1, :, :]
+                            # Remove the temporal dimension for VAE decode
+                            frame_latent = frame_latent.squeeze(2)
+                            # Decode single frame
+                            frame_sample = self.vae.decode(frame_latent, preserve_vram).sample
+                            frame_samples.append(frame_sample)
+                            # Clean up to prevent VRAM accumulation
+                            if frame_idx < temporal_frames - 1:
+                                torch.cuda.empty_cache()
+                        # Concatenate all frames - use same dimension as input
+                        sample = torch.stack(frame_samples, dim=2)
+                        del frame_samples
+                        print(f"🔧 Multi-frame output shape: {sample.shape}")
+                    else:
+                        # Single frame GGUF processing
+                        latent = latent.squeeze(2)
+                        sample = self.vae.decode(latent, preserve_vram).sample
+                        print(f"🔧 Single-frame output shape: {sample.shape}")
+                else:
+                    # Standard batch decode for non-GGUF models
+                    latent = latent.squeeze(2)
+                    sample = self.vae.decode(latent, preserve_vram).sample
+                
+                # Early NaN/Inf detection in VAE decode with selective replacement
+                if torch.isnan(sample).any() or torch.isinf(sample).any():
+                    print(f"⚠️ NaN/Inf detected in VAE decode output, batch {i}, applying selective fix")
+                    
+                    # Count affected pixels
+                    nan_count = torch.isnan(sample).sum().item()
+                    inf_count = torch.isinf(sample).sum().item()
+                    total_pixels = sample.numel()
+                    print(f"   NaN pixels: {nan_count}/{total_pixels}, Inf pixels: {inf_count}/{total_pixels}")
+                    
+                    # Selective replacement: only replace problematic pixels
+                    finite_mask = torch.isfinite(sample)
+                    if finite_mask.any():
+                        # Use median of valid pixels for replacement
+                        valid_values = sample[finite_mask]
+                        replacement_value = torch.median(valid_values)
+                        sample = torch.where(finite_mask, sample, replacement_value)
+                        print(f"   Replaced with median value: {replacement_value:.4f}")
+                    else:
+                        # All pixels are problematic - this indicates a serious issue
+                        print(f"   ⚠️ ALL pixels are NaN/Inf - using fallback generation")
+                        sample = torch.zeros_like(sample)
                 
                 # 🚀 OPTIMISATION 4: Post-processing conditionnel
                 if hasattr(self.vae, "postprocess"):
@@ -292,6 +365,11 @@ class VideoDiffusionInfer():
         temporal_overlap: int = 0,
         use_blockswap: bool = False,
     ) -> List[Tensor]:
+        # Add detailed timing for inference phases
+        inference_start_time = time.time()
+        if self.debug:
+            print(f"🔄 INFERENCE: Starting with batch_size={len(noises)}")
+        
         assert len(noises) == len(conditions) == len(texts_pos) == len(texts_neg)
         batch_size = len(noises)
 
@@ -350,8 +428,15 @@ class VideoDiffusionInfer():
             text_neg_embeds = text_neg_embeds.to(target_dtype)
 
         # Flatten.
+        # Phase 1: Preparation
+        if self.debug:
+            prep_start = time.time()
+            
         latents, latents_shapes = na.flatten(noises)
         latents_cond, _ = na.flatten(conditions)
+        
+        if self.debug:
+            print(f"🔄 INFERENCE: Phase 1 (Preparation) - {time.time() - prep_start:.3f}s")
 
         # Adapter les latents au dtype cible (compatible avec FP8)
         latents = latents.to(target_dtype) if latents.dtype != target_dtype else latents
@@ -360,10 +445,8 @@ class VideoDiffusionInfer():
         
         if preserve_vram:
             if conditions[0].shape[0] > 1:
-                t = time.time()
-                self.vae = self.vae.to("cpu")
-                if self.debug:
-                    print(f"🔄 VAE to CPU time: {time.time() - t} seconds")
+                print(f"🔧 VAE kept on GPU for optimal performance (preserve_vram VAE offload disabled)")
+                # VAE offload to CPU disabled - causes hangs with GGUF models and minimal VRAM benefit
             # Before sampling, check if BlockSwap is active
             if not use_blockswap and not hasattr(self, "_blockswap_active"):
                 t = time.time()
@@ -374,7 +457,10 @@ class VideoDiffusionInfer():
                 # BlockSwap manages device placement
                 pass
 
-        t = time.time()
+        # Phase 2: DiT Sampling
+        if self.debug:
+            sampling_start = time.time()
+            print(f"🔄 INFERENCE: Starting Phase 2 (DiT Sampling)...")
         
         with torch.autocast("cuda", target_dtype, enabled=True):
             latents = self.sampler.sample(
@@ -405,41 +491,73 @@ class VideoDiffusionInfer():
             )
         
         if self.debug:
-            print(f"🔄 INFERENCE time: {time.time() - t} seconds")
+            sampling_time = time.time() - sampling_start
+            print(f"🔄 INFERENCE: Phase 2 (DiT Sampling) - {sampling_time:.2f}s")
 
+        # Phase 3: Post-sampling preparation
+        if self.debug:
+            post_sampling_start = time.time()
+            
         latents = na.unflatten(latents, latents_shapes)
+        
+        if self.debug:
+            print(f"🔄 INFERENCE: Phase 3 (Post-sampling prep) - {time.time() - post_sampling_start:.3f}s")
         #print(f"🔄 UNFLATTEN time: {time.time() - t} seconds")
         
         # 🎯 Pré-calcul des dtypes (une seule fois)
         vae_dtype = getattr(torch, self.config.vae.dtype)
-        decode_dtype = torch.float16 if (vae_dtype == torch.float16 or target_dtype == torch.float16) else vae_dtype
+        # Use higher precision for high resolution processing
+        decode_dtype = torch.float32 if target_dtype is None else target_dtype
         if self.debug:
             print(f"🎯 decode_dtype: {decode_dtype}")
+        # Phase 4: Memory management (if preserve_vram enabled)
         if preserve_vram:
-            t = time.time()
-            self.dit = self.dit.to("cpu")
+            if self.debug:
+                memory_mgmt_start = time.time()
+                print(f"🔄 INFERENCE: Phase 4 (Memory management)...")
+            
+            # Only move DiT to CPU if not using BlockSwap (which handles its own memory)
+            use_blockswap = hasattr(self, "_blockswap_active") and self._blockswap_active
+            if not use_blockswap:
+                dit_transfer_start = time.time()
+                self.dit = self.dit.to("cpu")
+                if self.debug:
+                    print(f"   DiT to CPU: {time.time() - dit_transfer_start:.3f}s")
+            else:
+                if self.debug:
+                    print(f"   Skipping DiT CPU move - BlockSwap handles memory")
+            
             latents_cond = latents_cond.to("cpu")
             latents_shapes = latents_shapes.to("cpu")
             if latents[0].shape[0] > 1:
                 clear_vram_cache()
-            if self.debug:
-                print(f"🔄 Dit to CPU time: {time.time() - t} seconds")
             
-            if latents[0].shape[0] > 1:
-                t = time.time()
-                self.vae = self.vae.to(get_device())
-                
-                if self.debug:
-                    print(f"🔄 VAE to GPU time: {time.time() - t} seconds")
+            # VAE should already be on GPU from pre-loading, skip redundant move
+            if self.debug:
+                vae_device = next(self.vae.parameters()).device
+                print(f"   VAE already on {vae_device}, skipping transfer")
+                print(f"🔄 INFERENCE: Phase 4 (Memory mgmt) - {time.time() - memory_mgmt_start:.3f}s")
 
 
 
 
+        # VAE decode with detailed timing
+        if self.debug:
+            print(f"🔄 Starting VAE decode with {len(latents)} latents...")
+        tps_vae_decode = time.time()
+        
         #with torch.autocast("cuda", decode_dtype, enabled=True):
         samples = self.vae_decode(latents, target_dtype=decode_dtype, preserve_vram=preserve_vram)
         
         if self.debug:
+            vae_decode_time = time.time() - tps_vae_decode
+            total_inference_time = time.time() - inference_start_time
+            print(f"🔄 VAE DECODE COMPLETED: {vae_decode_time:.2f}s")
             print(f"🔄 Samples shape: {samples[0].shape}")
+            print(f"🔄 ===== TOTAL INFERENCE TIME: {total_inference_time:.2f}s =====")
+            if vae_decode_time > 5.0:
+                print(f"⚠️  WARNING: VAE decode took {vae_decode_time:.2f}s - this is unusually slow!")
+                print(f"⚠️  This indicates VAE is being moved between CPU/GPU or other issues!")
         #print(f"🔄  ULTRA-FAST VAE DECODE time: {time.time() - t} seconds")
         #t = time.time()
         #self.dit.to(get_device())

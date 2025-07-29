@@ -61,7 +61,8 @@ class SeedVR2:
                     "seedvr2_ema_7b_fp16.safetensors",
                     "seedvr2_ema_7b_fp8_e4m3fn.safetensors",
                     "seedvr2_ema_7b_sharp_fp16.safetensors",
-                    "seedvr2_ema_7b_sharp_fp8_e4m3fn.safetensors"
+                    "seedvr2_ema_7b_sharp_fp8_e4m3fn.safetensors",
+                    "seedvr2_ema_7b-Q4_K_M.gguf"
                 ], {
                     "default": "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
                 }),
@@ -138,7 +139,9 @@ class SeedVR2:
             )
             # Check if cache_model is enabled in config
             cache_model_enabled = block_swap_config and block_swap_config.get("cache_model", False)
-            should_keep_model = is_blockswap_active and cache_model_enabled
+            # Keep model if cache_model is enabled, regardless of BlockSwap status
+            # Note: State dict caching works independently of BlockSwap
+            should_keep_model = cache_model_enabled
         
         # Use existing debugger if available
         debugger = None
@@ -148,9 +151,12 @@ class SeedVR2:
         
         # Perform partial or full cleanup based on model caching
         if should_keep_model:
-            debugger.log("🧹 Partial cleanup - keeping model in RAM")
+            if debugger:
+                debugger.log("🧹 Partial cleanup - keeping model in RAM")
+            else:
+                print("🧹 Partial cleanup - keeping model in RAM")
             
-            # Clean BlockSwap with state preservation
+            # Clean BlockSwap with state preservation (if BlockSwap is active)
             if hasattr(self.runner, "_blockswap_active") and self.runner._blockswap_active:
                 cleanup_blockswap(self.runner, keep_state_for_cache=True)
             
@@ -239,60 +245,85 @@ class SeedVR2:
         """Internal execution logic with progress tracking"""
         total_start_time = time.time()
 
-        # Check if we should use model caching
-        use_cache = (
-            block_swap_config
-            and block_swap_config.get("blocks_to_swap", 0) > 0
-            and block_swap_config.get("cache_model", False)
-        )
+        try:
+            print(f"🔧 _internal_execute starting with model: {model}")
+            
+            # Check if we should use model caching
+            use_cache = (
+                block_swap_config
+                and block_swap_config.get("cache_model", False)
+            )
+            print(f"🔧 Use cache: {use_cache}")
 
-        if self.runner is not None:
-            current_model = getattr(self.runner, '_model_name', None)
-            model_changed = current_model != model
+            if self.runner is not None:
+                current_model = getattr(self.runner, '_model_name', None)
+                model_changed = current_model != model
 
-            if model_changed and self.runner is not None:
-                print(
-                    f"🔄 Model changed from {self.current_model_name} to {model}, clearing cache..."
-                )
-                self.cleanup(
-                    force_ram_cleanup=True,
-                    keep_model_cached=False,
+                if model_changed and self.runner is not None:
+                    print(
+                        f"🔄 Model changed from {self.current_model_name} to {model}, clearing cache..."
+                    )
+                    self.cleanup(
+                        force_ram_cleanup=True,
+                        keep_model_cached=False,
+                        block_swap_config=block_swap_config,
+                    )
+                    self.runner = None
+
+            # Configure runner
+            print("🔧 About to configure inference runner...")
+            runner_start = time.time()
+            
+            try:
+                self.runner = configure_runner(
+                    model, get_base_cache_dir(), preserve_vram, debug, 
                     block_swap_config=block_swap_config,
+                    cached_runner=self.runner  # Pass existing runner if any
                 )
-                self.runner = None
+                print(f"🔧 Runner configuration completed in {time.time() - runner_start:.2f}s")
+            except Exception as e:
+                print(f"❌ CRASH in configure_runner: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+            
+            self.current_model_name = model
+            
+            print("🔧 About to start generation loop...")
 
-        # Configure runner
-        if debug:
-            print("🔄 Configuring inference runner...")
-        runner_start = time.time()
-        self.runner = configure_runner(
-            model, get_base_cache_dir(), preserve_vram, debug, 
-            block_swap_config=block_swap_config,
-            cached_runner=self.runner  # Pass existing runner if any
-        )
-        
-        self.current_model_name = model
-        
-        if debug:
-            print(f"🔄 Runner configuration time: {time.time() - runner_start:.2f}s")
-        
-        if debug:
-            print("🚀 Starting video upscaling generation...")
-
-        # Execute generation with progress callback
-        sample = generation_loop(
-            self.runner, images, cfg_scale, seed, new_resolution, 
-            batch_size, preserve_vram, temporal_overlap, debug,
-            block_swap_config=block_swap_config,
-            progress_callback=self._progress_callback
-        )
-        
-        
-        print(f"✅ Video upscaling completed successfully!")       
-        # Cleanup
-        print(f"🔄 Total execution time: {time.time() - total_start_time:.2f}s")           
-        self.cleanup(force_ram_cleanup=True, keep_model_cached=use_cache, block_swap_config=block_swap_config)
-        return (sample,)
+            # Execute generation with progress callback
+            try:
+                sample = generation_loop(
+                    self.runner, images, cfg_scale, seed, new_resolution, 
+                    batch_size, preserve_vram, temporal_overlap, debug,
+                    block_swap_config=block_swap_config,
+                    progress_callback=self._progress_callback
+                )
+                print(f"🔧 Generation loop completed successfully!")
+            except Exception as e:
+                print(f"❌ CRASH in generation_loop: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+            
+            print(f"✅ Video upscaling completed successfully!")       
+            # Cleanup
+            print(f"🔄 Total execution time: {time.time() - total_start_time:.2f}s")           
+            self.cleanup(force_ram_cleanup=True, keep_model_cached=use_cache, block_swap_config=block_swap_config)
+            return (sample,)
+            
+        except Exception as e:
+            print(f"❌ CRASH in _internal_execute: {e}")
+            print(f"❌ Crash occurred at step: {locals().get('step', 'unknown')}")
+            import traceback
+            traceback.print_exc()
+            
+            # Memory info
+            if torch.cuda.is_available():
+                print(f"❌ CUDA memory allocated: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
+                print(f"❌ CUDA memory reserved: {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+            
+            raise
 
     def _progress_callback(self, batch_idx, total_batches, current_batch_frames, message=""):
         """Progress callback for generation loop"""
