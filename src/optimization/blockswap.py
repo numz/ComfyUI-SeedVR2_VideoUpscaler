@@ -71,7 +71,7 @@ def apply_block_swap_to_dit(runner, block_swap_config: Dict[str, Any], debug) ->
             raise ValueError("Debug instance must be provided to apply_block_swap_to_dit")
     
     debug.start_timer("apply_blockswap")
-    debug.log_memory_state("Before BlockSwap", show_tensors=False)
+    debug.log_memory_state("Before BlockSwap")
 
     # Get the actual model (handle FP8CompatibleDiT wrapper)
     model = runner.dit
@@ -151,7 +151,7 @@ def apply_block_swap_to_dit(runner, block_swap_config: Dict[str, Any], debug) ->
     _protect_model_from_move(model, runner, debug)
 
     debug.log("BlockSwap configuration complete", category="success")
-    debug.log_memory_state("After BlockSwap", show_tensors=False)
+    debug.log_memory_state("After BlockSwap")
     debug.end_timer("apply_blockswap", "BlockSwap configuration applied")
     
 
@@ -580,18 +580,29 @@ def cleanup_blockswap(runner, keep_state_for_cache: bool = False) -> None:
 
     # Restore RoPE methods and clear LRU caches
     if hasattr(model, '_rope_patches'):
-        for module, original_method in model._rope_patches:
-            # Clear the LRU cache before restoring
-            if hasattr(module.get_axial_freqs, 'cache_clear'):
-                module.get_axial_freqs.cache_clear()
-            module.get_axial_freqs = original_method
-            # Clean up wrapper attributes
-            if hasattr(module, '_rope_wrapped'):
-                delattr(module, '_rope_wrapped')
-            if hasattr(module, '_original_get_axial_freqs'):
-                delattr(module, '_original_get_axial_freqs')
-        debug.log(f"Restored {len(model._rope_patches)} RoPE modules", category="success")
-        delattr(model, '_rope_patches')
+        if keep_state_for_cache:
+            # Just clear caches but keep the device-aware wrappers
+            for module, original_method in model._rope_patches:
+                if hasattr(module.get_axial_freqs, 'cache_clear'):
+                    module.get_axial_freqs.cache_clear()
+                if hasattr(original_method, 'cache_clear'):
+                    original_method.cache_clear()
+            debug.log(f"Cleared {len(model._rope_patches)} RoPE caches (kept device-aware wrappers)", category="success")
+        else:
+            # Full cleanup - restore original methods
+            for module, original_method in model._rope_patches:
+                if hasattr(module.get_axial_freqs, 'cache_clear'):
+                    module.get_axial_freqs.cache_clear()
+                if hasattr(original_method, 'cache_clear'):
+                    original_method.cache_clear()
+                module.get_axial_freqs = original_method
+                # Clean up wrapper attributes
+                if hasattr(module, '_rope_wrapped'):
+                    delattr(module, '_rope_wrapped')
+                if hasattr(module, '_original_get_axial_freqs'):
+                    delattr(module, '_original_get_axial_freqs')
+            debug.log(f"Restored {len(model._rope_patches)} RoPE modules", category="success")
+            delattr(model, '_rope_patches')
     else:
         # Fallback: Clear RoPE caches without restoration
         cleared_count = 0
@@ -636,7 +647,7 @@ def cleanup_blockswap(runner, keep_state_for_cache: bool = False) -> None:
     if hasattr(model, '_blockswap_configured'):
         delattr(model, '_blockswap_configured')
 
-    # Move model to CPU to free VRAM (safe now that wrappers are removed)
+    # Move model to CPU to free VRAM
     if not keep_state_for_cache:
         model.to("cpu")
         debug.log("Moved model to CPU", category="store")

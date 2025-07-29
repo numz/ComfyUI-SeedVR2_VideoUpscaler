@@ -277,7 +277,7 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
 
     # Set random seed
     set_seed(seed)
-    debug.log_memory_state("Model configuration - Memory", show_tensors=False)
+    debug.log_memory_state("Model configuration - Memory")
     debug.end_timer("model_config", "Model configuration completed", show_breakdown=True)
 
     # ───────────────────────────────────────────────────────────────
@@ -309,7 +309,7 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
     text_neg_embeds = torch.load(os.path.join(script_directory, 'neg_emb.pt')).to(device, dtype=compute_dtype)
     text_embeds = {"texts_pos": [text_pos_embeds], "texts_neg": [text_neg_embeds]}
     
-    debug.log_memory_state("Input preparation - Memory ", show_tensors=False)
+    debug.log_memory_state("Input preparation - Memory ")
     debug.end_timer("input_prep", "Input preparation completed", show_breakdown=True)
     
     # ───────────────────────────────────────────────────────────────
@@ -448,10 +448,11 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
             # Clean VRAM after each batch when preserve_vram is active (but not with blockswap)
             if preserve_vram and not (block_swap_config and block_swap_config.get("blocks_to_swap", 0) > 0):
                 torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
             #del transformed_video
             #clear_vram_cache()
             # Log memory state at the end of each batch
-            debug.log_memory_state(f"Batch {batch_number} - Memory", show_tensors=False)
+            debug.log_memory_state(f"Batch {batch_number} - Memory")
             debug.end_timer(f"batch_{batch_number}", f"Batch {batch_number} processed", show_breakdown=True)
 
     finally:
@@ -465,11 +466,12 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
         runner.dit.to("cpu")
         runner.vae.to("cpu")
         torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
         #del text_pos_embeds, text_neg_embeds
         #clear_vram_cache()
 
         # Log final memory state
-        debug.log_memory_state("Generation cleanup - Memory", show_tensors=False)
+        debug.log_memory_state("Generation cleanup - Memory")
         debug.end_timer("generation_cleanup", "Batch generation cleanup")
     
     debug.end_timer("batch_processing", "Batch processing completed", show_breakdown=True)
@@ -524,6 +526,7 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
             # Nettoyage immédiat VRAM
             del current_block, block_result
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
             
         debug.log(f"Memory pre-allocation completed for output tensor: {final_video_images.shape}", category="success")
         debug.log("Pre-allocation ensures contiguous memory for final video output", category="info")
@@ -554,7 +557,7 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
                     debug.log(f"  Most swapped: Block {swap_summary['most_swapped_block']} "
                             f"({swap_summary['most_swapped_count']} times)", category="blockswap")
                     
-    debug.log_memory_state("Post-processing - Memory", show_tensors=False)
+    debug.log_memory_state("Post-processing - Memory")
     debug.end_timer("post_processing", "Post-processing completed", show_breakdown=True)
     
     # Cleanup batch_samples

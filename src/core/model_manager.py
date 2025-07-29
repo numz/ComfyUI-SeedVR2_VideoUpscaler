@@ -76,6 +76,10 @@ def configure_runner(model, base_cache_dir, preserve_vram=False, debug=None,
                 dit_model = dit_model.dit_model
             clear_rope_lru_caches(dit_model)
         
+        # Clear runner cache to prevent accumulation
+        if hasattr(cached_runner, 'cache') and hasattr(cached_runner.cache, 'cache'):
+            cached_runner.cache.cache.clear()
+        
         debug.log(f"Cache hit: Reusing runner for model {model}", category="reuse", force=True)
         
         # Check if blockswap needs to be applied

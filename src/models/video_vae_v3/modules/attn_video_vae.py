@@ -134,6 +134,7 @@ class Upsample3D(Upsample2D):
         # ADD BY NUMZ
         if preserve_vram:
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
         for i in range(len(hidden_states)):
             hidden_states[i] = self.upscale_conv(hidden_states[i])
             hidden_states[i] = rearrange(
@@ -153,6 +154,7 @@ class Upsample3D(Upsample2D):
         # ADD BY NUMZ
         if preserve_vram:
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
         if self.use_conv:
             if self.name == "conv":
                 hidden_states = self.conv(hidden_states, memory_state=memory_state, preserve_vram=preserve_vram)
@@ -312,6 +314,7 @@ class ResnetBlock3D(ResnetBlock2D):
             if hasattr(self, 'debug') and self.debug:
                 self.debug.log("OOM second chance: ResnetBlock3D", category="warning", force=True)
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
             time.sleep(1)
             hidden_states = self.nonlinearity(hidden_states)
 

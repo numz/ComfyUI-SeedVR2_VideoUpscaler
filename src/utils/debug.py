@@ -198,8 +198,16 @@ class Debug:
         
         return duration
         
-    def log_memory_state(self, label: str, show_diff: bool = True, show_tensors: bool = False) -> None:
-        """Log current memory usage with optional diff and tensor count"""
+    def log_memory_state(self, label: str, show_diff: bool = True, show_tensors: bool = True, 
+                     detailed_tensors: bool = False) -> None:
+        """Log current memory usage with optional diff and tensor count
+        
+        Args:
+            label: Description label for this memory checkpoint
+            show_diff: Show difference from last checkpoint
+            show_tensors: Show tensor counts
+            detailed_tensors: Show detailed tensor analysis (shapes, sizes, etc.)
+        """
         if not self.enabled:
             return
         
@@ -261,13 +269,107 @@ class Debug:
                 except:
                     pass
         
-        # Tensor count (optional)
+        # Tensor count and detailed analysis
         tensor_info = ""
         if show_tensors:
-            tensor_count = sum(1 for obj in gc.get_objects() if torch.is_tensor(obj))
-            cuda_tensor_count = sum(1 for obj in gc.get_objects() 
-                                if torch.is_tensor(obj) and obj.is_cuda)
-            tensor_info = f" --- [Tensors] {cuda_tensor_count} on GPU / {tensor_count} total"
+            # Collect all tensors
+            all_tensors = []
+            for obj in gc.get_objects():
+                try:
+                    if torch.is_tensor(obj):
+                        all_tensors.append(obj)
+                except:
+                    pass
+            
+            # Separate by device
+            gpu_tensors = [t for t in all_tensors if t.is_cuda]
+            cpu_tensors = [t for t in all_tensors if not t.is_cuda]
+            
+            tensor_info = f" --- [Tensors] {len(gpu_tensors)} on GPU / {len(all_tensors)} total"
+            
+            # Detailed tensor analysis
+            if detailed_tensors and (gpu_tensors or cpu_tensors):
+                self.log("\n" + "─" * 60, category="memory")
+                self.log("DETAILED TENSOR ANALYSIS", category="memory")
+                self.log("─" * 60, category="memory")
+                
+                # GPU Tensors Analysis
+                if gpu_tensors:
+                    # Calculate total memory
+                    gpu_memory = sum(t.element_size() * t.nelement() for t in gpu_tensors)
+                    self.log(f"\nGPU Tensors: {len(gpu_tensors)} tensors using {gpu_memory / 1024**3:.2f} GB", category="memory")
+                    
+                    # Group by shape for pattern recognition
+                    shape_groups = {}
+                    for t in gpu_tensors:
+                        shape_key = str(list(t.shape))
+                        if shape_key not in shape_groups:
+                            shape_groups[shape_key] = {
+                                'count': 0,
+                                'dtype': str(t.dtype),
+                                'size_mb': t.element_size() * t.nelement() / 1024**2,
+                                'example': t
+                            }
+                        shape_groups[shape_key]['count'] += 1
+                    
+                    # Sort by total memory used (count * size)
+                    sorted_shapes = sorted(
+                        shape_groups.items(), 
+                        key=lambda x: x[1]['count'] * x[1]['size_mb'], 
+                        reverse=True
+                    )
+                    
+                    self.log("\nTop GPU tensor patterns (by total memory):", category="memory")
+                    for i, (shape, info) in enumerate(sorted_shapes[:10]):
+                        total_mb = info['count'] * info['size_mb']
+                        self.log(f"  {i+1}. Shape {shape} × {info['count']} = {total_mb:.1f} MB total", category="memory")
+                        self.log(f"     Each: {info['size_mb']:.1f} MB, dtype: {info['dtype']}", category="memory")
+                    
+                    # Show largest individual tensors
+                    self.log("\nLargest individual GPU tensors:", category="memory")
+                    sorted_gpu = sorted(gpu_tensors, key=lambda t: t.element_size() * t.nelement(), reverse=True)
+                    for i, t in enumerate(sorted_gpu[:5]):
+                        size_mb = t.element_size() * t.nelement() / 1024**2
+                        self.log(f"  {i+1}. Shape: {list(t.shape)}, Size: {size_mb:.1f} MB, Dtype: {t.dtype}", category="memory")
+                        
+                        # Try to identify what it might be
+                        shape = t.shape
+                        if len(shape) == 4 and shape[1] in [320, 640, 1280, 1920]:  # UNet features
+                            self.log(f"     → Likely UNet feature map", category="memory")
+                        elif len(shape) == 2 and shape[0] == shape[1]:  # Square matrix
+                            self.log(f"     → Likely attention matrix", category="memory")
+                        elif len(shape) == 2 and shape[1] in [768, 1024, 2048, 4096]:  # Embeddings
+                            self.log(f"     → Likely embedding/hidden states", category="memory")
+                
+                # CPU Tensors Analysis (brief)
+                if cpu_tensors:
+                    cpu_memory = sum(t.element_size() * t.nelement() for t in cpu_tensors)
+                    self.log(f"\nCPU Tensors: {len(cpu_tensors)} tensors using {cpu_memory / 1024**3:.2f} GB", category="memory")
+                    
+                    # Just show a few largest
+                    sorted_cpu = sorted(cpu_tensors, key=lambda t: t.element_size() * t.nelement(), reverse=True)
+                    self.log("Largest CPU tensors:", category="memory")
+                    for i, t in enumerate(sorted_cpu[:3]):
+                        size_mb = t.element_size() * t.nelement() / 1024**2
+                        self.log(f"  {i+1}. Shape: {list(t.shape)}, Size: {size_mb:.1f} MB", category="memory")
+                
+                # Try to find model references
+                self.log("\n" + "─" * 60, category="memory")
+                
+                # Check for nn.Module instances
+                modules = [obj for obj in gc.get_objects() if isinstance(obj, torch.nn.Module)]
+                if modules:
+                    self.log(f"Found {len(modules)} nn.Module instances", category="memory")
+                    
+                    # Count by type
+                    module_types = {}
+                    for m in modules:
+                        mtype = type(m).__name__
+                        module_types[mtype] = module_types.get(mtype, 0) + 1
+                    
+                    self.log("Module types (top 5):", category="memory")
+                    for mtype, count in sorted(module_types.items(), key=lambda x: x[1], reverse=True)[:5]:
+                        self.log(f"  {mtype}: {count}", category="memory")
         
         # Build checkpoint
         checkpoint = {

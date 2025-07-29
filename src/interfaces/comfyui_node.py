@@ -127,7 +127,7 @@ class SeedVR2:
         self.debug.start_timer("total_execution")
         self.debug.log("\n─── Model Preparation ───", category="none")
         self.debug.start_timer("model_preparation")
-        self.debug.log_memory_state("Execution start", show_tensors=False)
+        self.debug.log_memory_state("Execution start")
         self.debug.log(f"Preparing model: {model}", category="general", force=True)
         
         # Check if download succeeded
@@ -180,7 +180,37 @@ class SeedVR2:
             # Clear caches but keep models
             if self.runner:              
                 clear_all_caches(self.runner, debug)
-            
+                
+                # Move VAE to CPU and clear intermediate tensors
+                if hasattr(self.runner, 'vae') and self.runner.vae is not None:
+                    debug.log("Moving VAE to CPU and clearing intermediate tensors", category="cleanup")
+                    
+                    # Clear any intermediate tensors/buffers in VAE
+                    for module in self.runner.vae.modules():
+                        # Clear module-specific caches
+                        if hasattr(module, '_temp_cache'):
+                            delattr(module, '_temp_cache')
+                        if hasattr(module, '_intermediate_cache'):
+                            delattr(module, '_intermediate_cache')
+                        
+                        # Clear any CUDA tensors in module attributes
+                        for attr_name in list(vars(module).keys()):
+                            attr = getattr(module, attr_name, None)
+                            if torch.is_tensor(attr) and attr.is_cuda:
+                                # Move tensor to CPU if it's not a parameter/buffer
+                                if attr_name not in module._parameters and attr_name not in module._buffers:
+                                    setattr(module, attr_name, attr.cpu())
+                                    del attr
+                    
+                    # Move entire VAE to CPU (preserves model for reuse)
+                    self.runner.vae = self.runner.vae.to('cpu')
+                    
+                    # Clear CUDA cache to free VRAM immediately
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                    
+                    debug.log("VAE moved to CPU, intermediate tensors cleared", category="success")
+
             debug.log("Models kept in RAM for next run", category="store")
             
         else:
@@ -208,12 +238,30 @@ class SeedVR2:
                     if hasattr(self.runner.dit, 'dit_model'):
                         # Clean inner model first
                         clear_rope_lru_caches(self.runner.dit.dit_model)
+                        # Ensure RoPE modules are on CPU
+                        for name, module in self.runner.dit.dit_model.named_modules():
+                            if hasattr(module, 'rope') and hasattr(module.rope, 'to'):
+                                module.rope = module.rope.to('cpu')
+                                if hasattr(module.rope, 'freqs'):
+                                    module.rope.freqs = module.rope.freqs.to('cpu')
                         fast_model_cleanup(self.runner.dit.dit_model)
-                        # Break reference from wrapper to model
+                        # Aggressively clear the wrapper too
                         self.runner.dit.dit_model = None
+                        # Delete the wrapper's __dict__ to break any circular refs
+                        self.runner.dit.__dict__.clear()
+                        # Break all references
+                        self.runner.dit.dit_model = None
+                        if hasattr(self.runner.dit, 'debug'):
+                            self.runner.dit.debug = None
                     else:
                         # Direct model cleanup
                         clear_rope_lru_caches(self.runner.dit)
+                        # Ensure RoPE modules are on CPU
+                        for name, module in self.runner.dit.named_modules():
+                            if hasattr(module, 'rope') and hasattr(module.rope, 'to'):
+                                module.rope = module.rope.to('cpu')
+                                if hasattr(module.rope, 'freqs'):
+                                    module.rope.freqs = module.rope.freqs.to('cpu')
                         fast_model_cleanup(self.runner.dit)
                     
                     del self.runner.dit
@@ -223,6 +271,8 @@ class SeedVR2:
                 if hasattr(self.runner, 'vae') and self.runner.vae is not None:
                     #from src.optimization.memory_manager import fast_model_cleanup
                     fast_model_cleanup(self.runner.vae)
+                    # Clear VAE's internal dict
+                    self.runner.vae.__dict__.clear()
                     del self.runner.vae
                     self.runner.vae = None
                 
@@ -252,6 +302,11 @@ class SeedVR2:
         # Fast RAM cleanup
         if force_ram_cleanup:
             fast_ram_cleanup()
+
+        # Clear any remaining references in the class
+        for attr in list(self.__dict__.keys()):
+            if attr not in ['__class__', '__module__', '__qualname__']:
+                setattr(self, attr, None)
 
 
     def _internal_execute(self, images, model, seed, new_resolution, cfg_scale, batch_size, 
@@ -284,7 +339,7 @@ class SeedVR2:
         )
         
         self.current_model_name = model
-        debug.log_memory_state("Model preparation completed", show_tensors=False)
+        debug.log_memory_state("Model preparation completed")
 
         debug.end_timer("model_preparation", "Model preparation", force=True, show_breakdown=True)
 
@@ -314,13 +369,13 @@ class SeedVR2:
             # Log memory usage summary
             allocated, reserved, peak = get_vram_usage()
             debug.log(f"Final VRAM usage - Allocated: {allocated:.2f}GB, Peak: {peak:.2f}GB", category="memory")
-        debug.log_memory_state("Video generation - Memory", show_tensors=False)
+        debug.log_memory_state("Video generation - Memory")
         debug.end_timer("generation_loop", "Video generation completed", show_breakdown=True)
        
         debug.log("\n─── Final Cleanup ───", category="none")
         debug.start_timer("final_cleanup")
         self.cleanup(force_ram_cleanup=True, cache_model=cache_model, debug=debug)
-        debug.log_memory_state("Final cleanup - Memory", show_tensors=False)
+        debug.log_memory_state("Final cleanup - Memory", detailed_tensors=False)
         debug.end_timer("final_cleanup", "Final cleanup completed", show_breakdown=True)
         # Cleanup  
         debug.log("\n─────────", category="none")

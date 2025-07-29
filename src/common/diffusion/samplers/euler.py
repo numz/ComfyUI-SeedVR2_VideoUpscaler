@@ -73,6 +73,7 @@ class EulerSampler(Sampler):
             del pred
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
             
             i += 1
             progress.update()
