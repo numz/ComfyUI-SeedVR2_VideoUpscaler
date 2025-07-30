@@ -12,13 +12,6 @@ import time
 from typing import Tuple, Optional
 from src.common.cache import Cache
 
-try:
-    from comfy import model_management as mm
-    COMFYUI_AVAILABLE = True
-except:
-    COMFYUI_AVAILABLE = False
-    pass
-
 def get_basic_vram_info():
     """🔍 Méthode basique avec PyTorch natif"""
     if not torch.cuda.is_available():
@@ -219,14 +212,15 @@ def fast_ram_cleanup():
         pass
     
 
-def clear_all_caches(runner, debug) -> int:
+def clear_all_caches(runner, debug, offload_vae=False) -> int:
     """
     Aggressively clear all caches from runner and model.
     Optimized to only process what's necessary.
     
     Args:
         runner: The runner instance to clear caches from
-        debug: Optional BlockSwapDebug instance for logging
+        debug: Optional Debug instance for logging
+        offload_vae: If True, also moves VAE to CPU and clears its caches
     """
     if not runner:
         return 0
@@ -235,7 +229,7 @@ def clear_all_caches(runner, debug) -> int:
     
     # Early exit if no caches to clear
     has_cache = hasattr(runner, 'cache') and hasattr(runner.cache, 'cache')
-    if not has_cache and not hasattr(runner, 'dit'):
+    if not has_cache and not hasattr(runner, 'dit') and not (offload_vae and hasattr(runner, 'vae')):
         return 0
     
     # Clear main runner cache efficiently
@@ -337,6 +331,36 @@ def clear_all_caches(runner, debug) -> int:
                 delattr(obj, attr)
                 cleaned_items += 1
                 debug.log(f"Cleared {attr} from {type(obj).__name__}", category="success")
+    
+    # Handle VAE offloading if requested
+    if offload_vae and hasattr(runner, 'vae') and runner.vae is not None:
+        debug.log("Moving VAE to CPU and clearing intermediate tensors", category="cleanup")
+        
+        # Clear any intermediate tensors/buffers in VAE
+        vae_caches_cleared = 0
+        for module in runner.vae.modules():
+            # Clear module-specific caches
+            for cache_attr in ['_temp_cache', '_intermediate_cache']:
+                if hasattr(module, cache_attr):
+                    delattr(module, cache_attr)
+                    vae_caches_cleared += 1
+            
+            # Clear any CUDA tensors in module attributes
+            for attr_name in list(vars(module).keys()):
+                attr = getattr(module, attr_name, None)
+                if torch.is_tensor(attr) and attr.is_cuda:
+                    # Move tensor to CPU if it's not a parameter/buffer
+                    if attr_name not in module._parameters and attr_name not in module._buffers:
+                        setattr(module, attr_name, attr.cpu())
+                        vae_caches_cleared += 1
+        
+        if vae_caches_cleared > 0:
+            debug.log(f"Cleared {vae_caches_cleared} VAE caches", category="success")
+        
+        # Move entire VAE to CPU (preserves model for reuse)
+        runner.vae = runner.vae.to('cpu')
+        debug.log("VAE moved to CPU, intermediate tensors cleared", category="success")
+        cleaned_items += vae_caches_cleared
                 
     # Force garbage collection
     gc.collect(2)  # Collect all generations
@@ -345,7 +369,5 @@ def clear_all_caches(runner, debug) -> int:
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-        if COMFYUI_AVAILABLE:
-            mm.soft_empty_cache()
 
     return cleaned_items

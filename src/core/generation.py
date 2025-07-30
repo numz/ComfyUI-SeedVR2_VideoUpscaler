@@ -25,7 +25,7 @@ from torchvision.transforms import Compose, Lambda, Normalize
 
 
 # Import required modules
-from src.optimization.memory_manager import reset_vram_peak
+from src.optimization.memory_manager import reset_vram_peak, clear_all_caches
 from src.optimization.performance import (
     optimized_video_rearrange, optimized_single_video_rearrange, 
     optimized_sample_to_image_format, temporal_latent_blending
@@ -445,10 +445,9 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
                 progress_callback(batch_count+1, total_batches, current_frames, "Processing batch...")
             #transformed_video = transformed_video.to("cpu")
             #print(f"🔄 Transformed video to cpu time: {time.time() - tps} seconds")
-            # Clean VRAM after each batch when preserve_vram is active (but not with blockswap)
-            if preserve_vram and not (block_swap_config and block_swap_config.get("blocks_to_swap", 0) > 0):
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
+            # Clean VRAM after each batch when preserve_vram is active
+            if preserve_vram:
+                clear_all_caches(runner, debug, offload_vae=True)
             #del transformed_video
             #clear_vram_cache()
             # Log memory state at the end of each batch

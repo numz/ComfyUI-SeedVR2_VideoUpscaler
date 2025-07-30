@@ -21,13 +21,6 @@ from typing import Dict, Any, List, Tuple, Optional, Union
 from src.optimization.memory_manager import get_vram_usage
 from src.optimization.compatibility import call_rope_with_stability
 
-try:
-    import comfy.model_management as mm
-    COMFYUI_AVAILABLE = True
-except:
-    COMFYUI_AVAILABLE = False
-    pass
-
 
 def get_module_memory_mb(module: torch.nn.Module) -> float:
     """
@@ -85,7 +78,7 @@ def apply_block_swap_to_dit(runner, block_swap_config: Dict[str, Any], debug) ->
     
     # Determine devices
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    offload_device = str(mm.unet_offload_device())
+    offload_device = "cpu"
     use_non_blocking = block_swap_config.get("use_non_blocking", True)
 
     configs = []
@@ -214,7 +207,9 @@ def _configure_blocks(model, device: str, offload_device: str,
                 buffer.data = buffer.data.to(target_device)
 
     # Clean up memory
-    mm.soft_empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
     gc.collect()
 
     return {
@@ -301,8 +296,9 @@ def _wrap_block_forward(block: torch.nn.Module, block_idx: int, model: torch.nn.
                 )
 
             # Only clear cache under memory pressure
-            if torch.cuda.memory_allocated() > torch.cuda.get_device_properties(0).total_memory * 0.9:
-                mm.soft_empty_cache()
+            if torch.cuda.is_available() and torch.cuda.memory_allocated() > torch.cuda.get_device_properties(0).total_memory * 0.9:
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
         else:
             output = original_forward(*args, **kwargs)
 
@@ -371,8 +367,9 @@ def _wrap_io_forward(module: torch.nn.Module, module_name: str, model: torch.nn.
             )
 
         # Only clear cache under memory pressure
-        if torch.cuda.memory_allocated() > torch.cuda.get_device_properties(0).total_memory * 0.9:
-            mm.soft_empty_cache()
+        if torch.cuda.is_available() and torch.cuda.memory_allocated() > torch.cuda.get_device_properties(0).total_memory * 0.9:
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
         return output
     
@@ -680,4 +677,6 @@ def cleanup_blockswap(runner, keep_state_for_cache: bool = False) -> None:
     gc.collect()
 
     # Final memory cleanup
-    mm.soft_empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()

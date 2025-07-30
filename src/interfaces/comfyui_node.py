@@ -179,37 +179,7 @@ class SeedVR2:
             
             # Clear caches but keep models
             if self.runner:              
-                clear_all_caches(self.runner, debug)
-                
-                # Move VAE to CPU and clear intermediate tensors
-                if hasattr(self.runner, 'vae') and self.runner.vae is not None:
-                    debug.log("Moving VAE to CPU and clearing intermediate tensors", category="cleanup")
-                    
-                    # Clear any intermediate tensors/buffers in VAE
-                    for module in self.runner.vae.modules():
-                        # Clear module-specific caches
-                        if hasattr(module, '_temp_cache'):
-                            delattr(module, '_temp_cache')
-                        if hasattr(module, '_intermediate_cache'):
-                            delattr(module, '_intermediate_cache')
-                        
-                        # Clear any CUDA tensors in module attributes
-                        for attr_name in list(vars(module).keys()):
-                            attr = getattr(module, attr_name, None)
-                            if torch.is_tensor(attr) and attr.is_cuda:
-                                # Move tensor to CPU if it's not a parameter/buffer
-                                if attr_name not in module._parameters and attr_name not in module._buffers:
-                                    setattr(module, attr_name, attr.cpu())
-                                    del attr
-                    
-                    # Move entire VAE to CPU (preserves model for reuse)
-                    self.runner.vae = self.runner.vae.to('cpu')
-                    
-                    # Clear CUDA cache to free VRAM immediately
-                    torch.cuda.empty_cache()
-                    torch.cuda.ipc_collect()
-                    
-                    debug.log("VAE moved to CPU, intermediate tensors cleared", category="success")
+                clear_all_caches(self.runner, debug, offload_vae=True)
 
             debug.log("Models kept in RAM for next run", category="store")
             
