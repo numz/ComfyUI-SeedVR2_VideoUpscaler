@@ -68,6 +68,11 @@ def wavelet_blur(image: Tensor, radius: int):
     """
     Apply wavelet blur to the input tensor.
     """
+    # Limit radius to prevent numerical instability at high resolutions
+    max_radius = min(radius, min(image.shape[-2:]) // 4)
+    if max_radius != radius:
+        radius = max_radius
+        
     # input shape: (1, 3, H, W)
     # convolution kernel
     kernel_vals = [
@@ -80,9 +85,15 @@ def wavelet_blur(image: Tensor, radius: int):
     kernel = kernel[None, None]
     # repeat the kernel across all input channels
     kernel = kernel.repeat(3, 1, 1, 1)
-    image = safe_pad_operation(image, (radius, radius, radius, radius), mode='replicate')
     # apply convolution
-    output = F.conv2d(image, kernel, groups=3, dilation=radius)
+    # Use safer padding for high resolution
+    try:
+        image = safe_pad_operation(image, (radius, radius, radius, radius), mode='replicate')
+        # apply convolution
+        output = F.conv2d(image, kernel, groups=3, dilation=radius)
+    except RuntimeError as e:
+        # Fallback to simple averaging
+        output = F.avg_pool2d(image, kernel_size=3, stride=1, padding=1)
     return output
 
 def wavelet_decomposition(image: Tensor, levels=5):
@@ -90,14 +101,30 @@ def wavelet_decomposition(image: Tensor, levels=5):
     Apply wavelet decomposition to the input tensor.
     This function only returns the low frequency & the high frequency.
     """
+    # Ensure input is in a stable dtype for high resolution processing
+    original_dtype = image.dtype
+    if original_dtype == torch.float16:
+        image = image.float()  # Use FP32 for numerical stability
+        
     high_freq = torch.zeros_like(image)
     for i in range(levels):
         radius = 2 ** i
         low_freq = wavelet_blur(image, radius)
-        high_freq += (image - low_freq)
+        # Add numerical stability check
+        diff = image - low_freq
+        if torch.isnan(diff).any() or torch.isinf(diff).any():
+            print(f"⚠️ NaN/Inf in wavelet level {i}, skipping this level")
+            break
+        
+        high_freq += diff
         image = low_freq
+        
+    # Convert back to original dtype
+    if original_dtype == torch.float16:
+        high_freq = high_freq.half()
+        image = image.half()
 
-    return high_freq, low_freq
+    return high_freq, image
 
 
 
@@ -106,6 +133,15 @@ def wavelet_reconstruction(content_feat:Tensor, style_feat:Tensor, debug):
     Apply wavelet decomposition, so that the content will have the same color as the style.
     """
     # Vérifier et ajuster les dimensions si nécessaire
+    # Store original dtype for final output
+    original_dtype = content_feat.dtype
+    
+    # Use FP32 for numerical stability in high resolution processing
+    if content_feat.dtype == torch.float16:
+        content_feat = content_feat.float()
+    if style_feat.dtype == torch.float16:
+        style_feat = style_feat.float()
+    
     if content_feat.shape != style_feat.shape:
         debug.log(f"Dimension mismatch detected: content {content_feat.shape} vs style {style_feat.shape}", category="warning", force=True)
         
@@ -120,6 +156,15 @@ def wavelet_reconstruction(content_feat:Tensor, style_feat:Tensor, debug):
                 align_corners=False
             )
             debug.log(f"Style resized to: {style_feat.shape}", category="info", force=True)
+    
+    # Add input validation
+    if torch.isnan(content_feat).any() or torch.isinf(content_feat).any():
+        debug.log(f"NaN/Inf in content_feat input, cleaning...", category="warning", force=True)
+        content_feat = torch.nan_to_num(content_feat, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+    if torch.isnan(style_feat).any() or torch.isinf(style_feat).any():
+        debug.log(f"NaN/Inf in style_feat input, cleaning...", category="warning", force=True)
+        style_feat = torch.nan_to_num(style_feat, nan=0.0, posinf=1.0, neginf=-1.0)
     
     # calculate the wavelet decomposition of the content feature
     content_high_freq, content_low_freq = wavelet_decomposition(content_feat)
@@ -139,4 +184,23 @@ def wavelet_reconstruction(content_feat:Tensor, style_feat:Tensor, debug):
         )
     
     # reconstruct the content feature with the style's high frequency
-    return content_high_freq + style_low_freq
+    result = content_high_freq + style_low_freq
+    
+    # Final validation and cleanup
+    if torch.isnan(result).any() or torch.isinf(result).any():
+        debug.log("NaN/Inf in wavelet reconstruction result, applying selective fix", category="warning", force=True)
+        # Selective fix: only replace problematic pixels, preserve good ones
+        finite_mask = torch.isfinite(result)
+        if finite_mask.any():
+            valid_values = result[finite_mask]
+            replacement_value = torch.median(valid_values)
+            result = torch.where(finite_mask, result, replacement_value)
+        else:
+            # Complete failure - use original content
+            result = content_feat
+            
+    # Convert back to original dtype
+    if original_dtype == torch.float16:
+        result = result.half()
+        
+    return result

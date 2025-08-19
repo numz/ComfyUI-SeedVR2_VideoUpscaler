@@ -457,7 +457,22 @@ def parse_arguments():
                             "seedvr2_ema_3b_fp16.safetensors",
                             "seedvr2_ema_3b_fp8_e4m3fn.safetensors", 
                             "seedvr2_ema_7b_fp16.safetensors",
-                            "seedvr2_ema_7b_fp8_e4m3fn.safetensors"
+                            "seedvr2_ema_7b_fp8_e4m3fn.safetensors",
+                            "seedvr2_ema_3b-Q3_K_M.gguf",
+                            "seedvr2_ema_3b-Q4_K_M.gguf",
+                            "seedvr2_ema_3b-Q5_K_M.gguf",
+                            "seedvr2_ema_3b-Q6_K_M.gguf",
+                            "seedvr2_ema_3b-Q8_K_M.gguf",
+                            "seedvr2_ema_7b-Q3_K_M.gguf",
+                            "seedvr2_ema_7b-Q4_K_M.gguf",
+                            "seedvr2_ema_7b-Q5_K_M.gguf",
+                            "seedvr2_ema_7b-Q6_K_M.gguf",
+                            "seedvr2_ema_7b-Q8_K_M.gguf",
+                            "seedvr2_ema_7b_sharp-Q3_K_M.gguf",
+                            "seedvr2_ema_7b_sharp-Q4_K_M.gguf",
+                            "seedvr2_ema_7b_sharp-Q5_K_M.gguf",
+                            "seedvr2_ema_7b_sharp-Q6_K_M.gguf",
+                            "seedvr2_ema_7b_sharp-Q8_K_M.gguf"
                         ],
                         help="Model to use (default: 3B FP8)")
     parser.add_argument("--model_dir", type=str, default="seedvr2_models",

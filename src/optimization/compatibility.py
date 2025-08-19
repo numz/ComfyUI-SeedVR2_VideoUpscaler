@@ -33,15 +33,17 @@ class FP8CompatibleDiT(torch.nn.Module):
     - Flash Attention: Automatic optimization of attention layers
     """
     
-    def __init__(self, dit_model, skip_conversion=False, debug=None):
+    def __init__(self, dit_model, skip_conversion=False, blockswap_active=None, debug=None):
         super().__init__()
-        self.dit_model = dit_model
+        self.debug = debug if debug is not None else None
         if debug is None:
             raise ValueError("Debug instance must be provided to FP8CompatibleDiT")
-        self.debug = debug if debug is not None else None
+            
+        self.dit_model = dit_model
         self.model_dtype = self._detect_model_dtype()
         self.is_fp8_model = self.model_dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
         self.is_fp16_model = self.model_dtype == torch.float16
+        self.blockswap_active = blockswap_active if blockswap_active is not None else None
 
         # Only convert if not already done (e.g., when reusing cached weights)
         if not skip_conversion and self.is_fp8_model:
@@ -409,19 +411,20 @@ class FP8CompatibleDiT(torch.nn.Module):
             
             args = tuple(converted_args)
             kwargs = converted_kwargs
-        
-        # Force move weights to device
-        input_device = None
-        for value in kwargs.values():
-            if isinstance(value, torch.Tensor):
-                input_device = value.device
-                break
-        
-        if input_device is not None:
-            model_device = next(self.dit_model.parameters()).device
-            if model_device != input_device:
-                self.debug.log(f"Auto-moving DiT model from {model_device} to {input_device}", category="memory")
-                self.dit_model = self.dit_model.to(input_device)
+            
+        # Force move weights to device    
+        if not self.blockswap_active:
+            input_device = None
+            for value in kwargs.values():
+                if isinstance(value, torch.Tensor):
+                    input_device = value.device
+                    break
+            
+            if input_device is not None:
+                model_device = next(self.dit_model.parameters()).device
+                if model_device != input_device:
+                    self.debug.log(f"Auto-moving DiT model from {model_device} to {input_device}", category="memory")
+                    self.dit_model = self.dit_model.to(input_device)
         
         # Execute forward pass
         try:
@@ -436,13 +439,13 @@ class FP8CompatibleDiT(torch.nn.Module):
     
     def __getattr__(self, name):
         """Redirect all other attributes to original model"""
-        if name in ['dit_model', 'model_dtype', 'is_fp8_model', 'is_fp16_model']:
+        if name in ['dit_model', 'model_dtype', 'is_fp8_model', 'is_fp16_model', 'blockswap_active']:
             return super().__getattr__(name)
         return getattr(self.dit_model, name)
     
     def __setattr__(self, name, value):
         """Redirect assignments to original model except for our attributes"""
-        if name in ['dit_model', 'model_dtype', 'is_fp8_model', 'is_fp16_model']:
+        if name in ['dit_model', 'model_dtype', 'is_fp8_model', 'is_fp16_model', 'blockswap_active']:
             super().__setattr__(name, value)
         else:
             if hasattr(self, 'dit_model'):

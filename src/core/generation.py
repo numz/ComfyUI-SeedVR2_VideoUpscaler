@@ -424,6 +424,14 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
             #if temporal_overlap > 0 and not is_first_batch and sample.shape[0] > effective_batch_size - temporal_overlap:
             #    sample = sample[temporal_overlap:]  # Remove overlap frames from output
             
+            # Don't cut frames - keep all generated frames for GGUF models
+            if getattr(runner, '_is_gguf_model', False):
+                debug.log(f"GGUF: Keeping all {sample.shape[0]} generated frames", category="info")
+            else:
+                if ori_lengths[0] < sample.shape[0]:
+                    debug.log(f"Cutting from {sample.shape[0]} to {ori_lengths[0]} frames", category="info")
+                    sample = sample[:ori_lengths[0]]
+            
             # Apply color correction if available
             debug.start_timer("video_to_device")
             transformed_video = transformed_video.to(device)
@@ -454,6 +462,15 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
             # Clean VRAM after each batch when preserve_vram is active
             if preserve_vram:
                 clear_all_caches(runner, debug, offload_vae=True)
+            
+            # For GGUF models with larger batches, force more aggressive cleanup
+            if getattr(runner, '_is_gguf_model', False) and current_frames >= 5:
+                gc.collect()
+                if torch.mps.is_available():
+                    torch.mps.empty_cache()
+                else:
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
             #del transformed_video
             #clear_vram_cache()
             # Log memory state at the end of each batch

@@ -8,7 +8,7 @@ import urllib.error
 from typing import Optional
 from torchvision.datasets.utils import download_url
 
-from src.utils.model_registry import MODEL_REGISTRY, get_model_repo, DEFAULT_VAE
+from src.utils.model_registry import get_model_repo, DEFAULT_VAE
 from src.utils.constants import get_base_cache_dir
 
 # HuggingFace URL template
@@ -27,10 +27,10 @@ def download_weight(model: str, model_dir: Optional[str] = None, debug=None) -> 
     cache_dir = model_dir or get_base_cache_dir()
     model_path = os.path.join(cache_dir, model)
     vae_path = os.path.join(cache_dir, DEFAULT_VAE)
-    
+    is_gguf = model.endswith('.gguf')
     # Download model if not exists
     if not os.path.exists(model_path):
-        repo = get_model_repo(model)
+        repo = get_model_repo(model, gguf=is_gguf)
         url = HUGGINGFACE_BASE_URL.format(repo=repo, filename=model)
         
         if debug:
@@ -48,7 +48,7 @@ def download_weight(model: str, model_dir: Optional[str] = None, debug=None) -> 
     
     # Download VAE if not exists
     if not os.path.exists(vae_path):
-        vae_repo = get_model_repo(DEFAULT_VAE)
+        vae_repo = get_model_repo(DEFAULT_VAE, gguf=is_gguf)
         vae_url = HUGGINGFACE_BASE_URL.format(repo=vae_repo, filename=DEFAULT_VAE)
         
         if debug:

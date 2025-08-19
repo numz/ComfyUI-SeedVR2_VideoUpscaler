@@ -9,7 +9,7 @@ from typing import Tuple, Dict, Any
 
 from src.utils.constants import get_base_cache_dir
 from src.utils.downloads import download_weight
-from src.utils.model_registry import get_available_models, DEFAULT_MODEL
+from src.utils.model_registry import get_available_models, DEFAULT_MODEL, DEFAULT_GGUF_MODEL
 from src.utils.constants import get_script_directory
 from src.utils.debug import Debug
 from src.core.model_manager import configure_runner
@@ -404,6 +404,21 @@ class SeedVR2:
             pass
 
 
+class SeedVR2GGUF(SeedVR2):
+    
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Dict[str, Any]]:
+        base_inputs = super().INPUT_TYPES()
+        
+        base_inputs["required"]["model"] = (
+            get_available_models(gguf=True), {
+                "default": DEFAULT_GGUF_MODEL,
+                "tooltip": "Model variants with different sizes and precisions. Models will automatically download on first use. Additional models can be added to the ComfyUI models folder."
+            }
+        )
+        return base_inputs
+
+
 class SeedVR2BlockSwap:
     """Configure block swapping to reduce VRAM usage"""
 
@@ -543,6 +558,7 @@ class SeedVR2ExtraArgs:
 # ComfyUI Node Mappings
 NODE_CLASS_MAPPINGS = {
     "SeedVR2": SeedVR2,
+    "SeedVR2GGUF": SeedVR2GGUF,
     "SeedVR2BlockSwap": SeedVR2BlockSwap,
     "SeedVR2ExtraArgs": SeedVR2ExtraArgs,
 }
@@ -550,6 +566,7 @@ NODE_CLASS_MAPPINGS = {
 # Human-readable node display names
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SeedVR2": "SeedVR2 Video Upscaler",
+    "SeedVR2GGUF": "SeedVR2 Video Upscaler (GGUF)",
     "SeedVR2BlockSwap": "SeedVR2 BlockSwap Config",
     "SeedVR2ExtraArgs": "SeedVR2 Extra Args",
 }
