@@ -89,6 +89,15 @@ def configure_runner(model, base_cache_dir, preserve_vram=False, debug=None,
     
     # Check if we can reuse the cached runner
     if cached_runner and cache_model:
+        # Update all runtime parameters dynamically
+        runtime_params = {
+            'vae_tiling_enabled': vae_tiling_enabled,
+            'vae_tile_size': vae_tile_size,
+            'vae_tile_overlap': vae_tile_overlap
+        }
+        for key, value in runtime_params.items():
+            setattr(cached_runner, key, value)
+        
         # Clear RoPE caches before reuse
         if hasattr(cached_runner, 'dit'):
             dit_model = cached_runner.dit
@@ -110,35 +119,20 @@ def configure_runner(model, base_cache_dir, preserve_vram=False, debug=None,
             cached_runner._blockswap_active = True
 
         if blockswap_needed:
-            # Check if we have cached configuration
-            has_cached_config = hasattr(cached_runner, "_cached_blockswap_config")
+            # Check if configuration changed (compare entire dicts)
+            cached_config = getattr(cached_runner, "_cached_blockswap_config", None)
+            config_matches = (cached_config == block_swap_config)
             
-            if has_cached_config:
-                # Compare configurations
-                cached_config = cached_runner._cached_blockswap_config
-                config_matches = (
-                    cached_config.get("blocks_to_swap") == block_swap_config.get("blocks_to_swap") and
-                    cached_config.get("offload_io_components") == block_swap_config.get("offload_io_components", False) and
-                    cached_config.get("use_non_blocking") == block_swap_config.get("use_non_blocking", True)
-                )
-                
-                if config_matches:
-                    # Configuration matches - fast re-application
-                    debug.log("BlockSwap config matches, performing fast re-application", category="reuse", force=True)
-                    
-                    # Mark as active before applying
-                    cached_runner._blockswap_active = True
-                    
-                    # Apply BlockSwap (will be fast since model structure is intact)
-                    apply_block_swap_to_dit(cached_runner, block_swap_config, debug)
-                else:
-                    # Configuration changed - apply new config
-                    debug.log("BlockSwap configuration changed, applying new config", category="blockswap", force=True)
-                    apply_block_swap_to_dit(cached_runner, block_swap_config, debug)
+            if config_matches:
+                # Configuration matches - fast re-application
+                debug.log("BlockSwap config matches, performing fast re-application", category="reuse", force=True)
+                cached_runner._blockswap_active = True
+                apply_block_swap_to_dit(cached_runner, block_swap_config, debug)
             else:
-                # No cached config - apply fresh
+                # Configuration changed or new - apply config
                 debug.log("Applying BlockSwap to cached runner", category="blockswap", force=True)
                 apply_block_swap_to_dit(cached_runner, block_swap_config, debug)
+                cached_runner._cached_blockswap_config = block_swap_config.copy() if block_swap_config else None
             
             # Store debug instance on runner
             cached_runner.debug = debug
@@ -147,6 +141,7 @@ def configure_runner(model, base_cache_dir, preserve_vram=False, debug=None,
             # No BlockSwap needed
             cached_runner.debug = debug
             return cached_runner
+        
     else:
         debug.log(f"Cache miss: Creating new runner for model {model}", category="cache", force=True)
     

@@ -520,28 +520,35 @@ def generation_loop(runner, images, cfg_scale=1.0, seed=666, res_w=720, batch_si
         # 2. Pré-allouer le tensor final directement sur CPU (évite concatenations)
         final_video_images = torch.empty((total_frames, H, W, C), dtype=torch.float16)
         
-        # 3. Copier par blocs directement dans le tensor final
-        block_size = 500
+        # 3. Merge batch results into final tensor (in groups to manage memory)
+        batch_merge_size = 500  # Number of batch results to merge at once
         current_idx = 0
-        
-        for block_start in range(0, len(batch_samples), block_size):
-            block_end = min(block_start + block_size, len(batch_samples))
-            block_num = block_start // block_size + 1
-            total_blocks = (len(batch_samples) + block_size - 1) // block_size
+
+        for merge_start in range(0, len(batch_samples), batch_merge_size):
+            merge_end = min(merge_start + batch_merge_size, len(batch_samples))
+            merge_group = merge_start // batch_merge_size + 1
+            total_merge_groups = (len(batch_samples) + batch_merge_size - 1) // batch_merge_size
+
+            if total_merge_groups == 1:
+                # All batches fit in one merge operation
+                debug.log(f"Merging all {len(batch_samples)} batch results in single operation", category="video")
+            else:
+                # Multiple merge operations needed
+                batch_start_display = merge_start + 1  # Convert to 1-based for display
+                batch_end_display = min(merge_end, len(batch_samples))  # Ensure we don't go past actual count
+                debug.log(f"Merging batch results {merge_group}/{total_merge_groups}: batches {batch_start_display}-{batch_end_display}", category="video")
             
-            debug.log(f"Block {block_num}/{total_blocks}: batch_samples {block_start}-{block_end-1}", category="general")
+            batch_group = []
+            for i in range(merge_start, merge_end):
+                batch_group.append(batch_samples[i])
             
-            current_block = []
-            for i in range(block_start, block_end):
-                current_block.append(batch_samples[i])
+            merged_result = torch.cat(batch_group, dim=0)
+            merged_frames = merged_result.shape[0]
+            final_video_images[current_idx:current_idx + merged_frames] = merged_result
+            current_idx += merged_frames
             
-            block_result = torch.cat(current_block, dim=0)
-            block_frames = block_result.shape[0]
-            final_video_images[current_idx:current_idx + block_frames] = block_result
-            current_idx += block_frames
-            
-            # Clean up current block memory
-            del current_block, block_result
+            # Clean up merged batch memory
+            del batch_group, merged_result
             
         debug.log(f"Memory pre-allocation completed for output tensor: {final_video_images.shape}", category="success")
         debug.log("Pre-allocation ensures contiguous memory for final video output", category="info")
