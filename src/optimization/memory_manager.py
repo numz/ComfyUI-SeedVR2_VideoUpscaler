@@ -23,7 +23,15 @@ except:
 def get_basic_vram_info():
     """🔍 Méthode basique avec PyTorch natif"""
     if not torch.cuda.is_available():
-        return {"error": "CUDA not available"}
+        from loguru import logger
+        logger.info("SeedVR2_VideoUpscaler: use fake memory info")
+        free_memory, total_memory = (24893718528*2, 25438126080*2)
+        free_gb = free_memory / (1024**3)
+        total_gb = total_memory / (1024**3)
+        return {
+            "free_gb": free_gb,
+            "total_gb": total_gb
+        }
     
     # Mémoire libre et totale (en bytes)
     free_memory, total_memory = torch.cuda.mem_get_info()
