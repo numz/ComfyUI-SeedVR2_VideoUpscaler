@@ -532,11 +532,12 @@ class FP8CompatibleDiT(torch.nn.Module):
                 )
             else:
                 # Use optimized SDPA
-                with torch.backends.cuda.sdp_kernel(
-                    enable_flash=True,
-                    enable_math=True,
-                    enable_mem_efficient=True
-                ):
+                with torch.nn.attention.sdpa_kernel([
+                    torch.nn.attention.SDPBackend.MATH,
+                    torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                    torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+                    torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                ]):
                     attn_output = torch.nn.functional.scaled_dot_product_attention(
                         q, k, v,
                         dropout_p=0.0,
