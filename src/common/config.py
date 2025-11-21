@@ -19,6 +19,7 @@ Configuration utility functions
 import importlib
 from typing import Any, Callable, List, Union
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from ..utils.model_registry import MODEL_CLASSES
 
 try:
     OmegaConf.register_new_resolver("eval", eval)
@@ -87,40 +88,26 @@ def resolve_inheritance(config: Union[DictConfig, ListConfig]) -> Any:
     return config
 
 
-def import_item(path: Union[str, List[str]], name: str) -> Any:
+def import_item(path: str, name: str) -> Any:
     """
-    Import a python item with fallback support.
+    Import a python item, checking model registry first.
     
     Args:
-        path: Single path string or list of paths to try (fallback order)
+        path: Module path
         name: Class/function name to import
         
     Returns:
         Imported object
-        
-    Example: 
-        import_item("path.to.file", "MyClass") -> MyClass
-        import_item(["path1.to.file", "path2.to.file"], "MyClass") -> MyClass (first working path)
     """
-    if isinstance(path, str):
-        # Single path - original behavior
+    # Simple lookup with path as key
+    if path in MODEL_CLASSES:
+        return MODEL_CLASSES[path]
+    
+    # Fallback to dynamic import for everything else
+    try:
         return getattr(importlib.import_module(path), name)
-    
-    elif isinstance(path, (list, ListConfig)):
-        # Multiple paths - try each until one works
-        last_error = None
-        for single_path in path:
-            try:
-                return getattr(importlib.import_module(single_path), name)
-            except ImportError as e:
-                last_error = e
-                continue
-        
-        # If we get here, none of the paths worked
-        raise ImportError(f"Could not import '{name}' from any of the paths: {path}. Last error: {last_error}")
-    
-    else:
-        raise ValueError(f"Path must be string or list of strings, got: {type(path)}")
+    except (ImportError, AttributeError) as e:
+        raise ImportError(f"Could not import '{name}' from '{path}': {e}")
 
 
 def create_object(config: DictConfig) -> Any:

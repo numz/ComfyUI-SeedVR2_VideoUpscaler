@@ -16,11 +16,21 @@
 Advanced distributed functions for sequence parallel.
 """
 
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.fsdp import ShardingStrategy
+
+# Conditional imports for distributed training features (not needed for inference)
+try:
+    from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+    from torch.distributed.fsdp import ShardingStrategy
+    _FSDP_AVAILABLE = True
+except (ImportError, AttributeError):
+    # AMD ROCm and other builds may not have full FSDP support
+    DeviceMesh = None
+    init_device_mesh = None
+    ShardingStrategy = None
+    _FSDP_AVAILABLE = False
 
 from .basic import get_global_rank, get_world_size
 
@@ -148,6 +158,11 @@ def init_model_shard_group(
     """
     Initialize process group of model sharding.
     """
+    if not _FSDP_AVAILABLE:
+        raise RuntimeError(
+            "FSDP features are not available in this PyTorch build. "
+            "Model sharding requires torch.distributed.fsdp support."
+        )
     global _MODEL_SHARD_INTER_GROUP
     global _MODEL_SHARD_INTRA_GROUP
     global _MODEL_SHARD_CPU_INTER_GROUP

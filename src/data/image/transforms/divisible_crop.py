@@ -38,3 +38,43 @@ class DivisibleCrop:
 
         image = TVF.center_crop(img=image, output_size=(cropped_height, cropped_width))
         return image
+
+
+class DivisiblePad:
+    """
+    Pad image to make dimensions divisible by a factor.
+    Pads with black (0) to avoid data loss.
+    """
+    def __init__(self, factor):
+        if not isinstance(factor, tuple):
+            factor = (factor, factor)
+        self.height_factor, self.width_factor = factor[0], factor[1]
+
+    def __call__(self, image: Union[torch.Tensor, Image.Image]):
+        if isinstance(image, torch.Tensor):
+            height, width = image.shape[-2:]
+        elif isinstance(image, Image.Image):
+            width, height = image.size
+        else:
+            raise NotImplementedError
+
+        # Calculate padding needed
+        pad_height = (self.height_factor - (height % self.height_factor)) % self.height_factor
+        pad_width = (self.width_factor - (width % self.width_factor)) % self.width_factor
+
+        if pad_height == 0 and pad_width == 0:
+            return image
+
+        # Pad symmetrically (or bottom/right)
+        if isinstance(image, torch.Tensor):
+            # Pad format: (left, right, top, bottom)
+            padding = (0, pad_width, 0, pad_height)
+            image = torch.nn.functional.pad(image, padding, mode='constant', value=0.0)
+        elif isinstance(image, Image.Image):
+            new_width = width + pad_width
+            new_height = height + pad_height
+            result = Image.new(image.mode, (new_width, new_height), (0, 0, 0))
+            result.paste(image, (0, 0))
+            image = result
+
+        return image

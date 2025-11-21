@@ -70,5 +70,6 @@ def create_sampling_timesteps_from_config(
             steps=config.steps,
             shift=config.get("shift", 1.0),
             device=device,
+            dtype=dtype,
         )
     raise NotImplementedError

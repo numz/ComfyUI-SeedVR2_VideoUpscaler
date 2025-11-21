@@ -414,8 +414,9 @@ class SPDistForward:
         self.name = name
         self.comm_shape = comm_shape
         if device:
-            self.device = device
+            self.device = device if isinstance(device, torch.device) else torch.device(device)
         else:
+            # Fallback to standard device detection
             self.device = get_device()
 
     def __call__(self, inputs) -> Any:

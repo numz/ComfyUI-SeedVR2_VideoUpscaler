@@ -15,7 +15,6 @@
 import torch
 from rotary_embedding_torch import RotaryEmbedding
 from torch import nn
-from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
 
 __all__ = ["meta_non_persistent_buffer_init_fn"]
 

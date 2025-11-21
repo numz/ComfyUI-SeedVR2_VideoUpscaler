@@ -2,37 +2,157 @@
 
 [![View Code](https://img.shields.io/badge/📂_View_Code-GitHub-181717?style=for-the-badge&logo=github)](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
 
-Official release of [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) for ComfyUI that enables Upscale Video/Images generation.
+Official release of [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) for ComfyUI that enables high-quality video and image upscaling.
 
-Can run as **Multi-GPU standalone** too, see [🖥️ Run as Standalone](#️-run-as-standalone) section.
+Can run as **Multi-GPU standalone CLI** too, see [🖥️ Run as Standalone](#️-run-as-standalone-cli) section.
 
-<img src="docs/demo_01.jpg">
-<img src="docs/demo_02.jpg">
+[![SeedVR2 v2.5 Deep Dive Tutorial](https://img.youtube.com/vi/MBtWYXq_r60/maxresdefault.jpg)](https://youtu.be/MBtWYXq_r60)
 
-<img src="docs/usage.png">
+![Usage Example](docs/usage_01.png)
+
+![Usage Example](docs/usage_02.png)
 
 ## 📋 Quick Access
 
-- [🆙 Note and futur releases](#-note-and-futur-releases)
+- [🆙 Future Releases](#-future-releases)
 - [🚀 Updates](#-updates)
 - [🎯 Features](#-features)
 - [🔧 Requirements](#-requirements)
 - [📦 Installation](#-installation)
 - [📖 Usage](#-usage)
-- [🖥️ Run as Standalone](#️-run-as-standalone)
-- [📊 Benchmarks](#-benchmarks)
-- [⚠️ Limitations](#-Limitations)
+- [🖥️ Run as Standalone](#️-run-as-standalone-cli)
+- [⚠️ Limitations](#️-limitations)
 - [🤝 Contributing](#-contributing)
 - [🙏 Credits](#-credits)
-- [📄 License](#-license)
+- [📜 License](#-license)
 
-## 🆙 Note and futur releases
+## 🆙 Future Releases
 
-- Improve FP8 integration, we are loosing some FP8 advantages during the process.
-- Tile-VAE integration if it works for video, I have test to do or if some dev want help, you are welcome.
-- 7B FP8 model seems to have quality issues, use 7BFP16 instead (If FP8 don't give OOM then FP16 will works) I have to review this.
+We're actively working on improvements and new features. To stay informed:
+
+- **📌 Track Active Development**: Visit [Issues](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/issues) to see active development, report bugs, and request new features
+- **💬 Join the Community**: Learn from others, share your workflows, and get help in the [Discussions](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/discussions)
+- **🔮 Next Model Survey**: We're looking for community input on the next open-source super-powerful generic restoration model. Share your suggestions in [Issue #164](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/issues/164)
 
 ## 🚀 Updates
+
+**2025.11.13 - Version 2.5.10**
+
+- **🎯 Fix: Deterministic generation** - Identical images with the same seed now produce identical results across different sessions and batch positions
+- **🔧 Fix: Model caching with BlockSwap** - Resolved issue where cached DiT models wouldn't properly reload when VAE caching state changed
+- **💾 Fix: Runner caching optimization** - Runner templates now correctly cache whenever both DiT and VAE are cached, regardless of caching order
+- **📁 Fix: Case-insensitive model paths** - Extra model paths in YAML config now work regardless of case (seedvr2, SEEDVR2, SeedVR2, etc.)
+- **🐛 Fix: High resolution tile debug crash** - Fixed "NoneType has no attribute log" error when using maximum resolution with VAE tiling
+- **📊 Fix: Temporal overlap logging** - Corrected frame count reporting when temporal overlap is automatically adjusted
+- **🔍 Feature: Enhanced model path debugging** - Added detailed logging to help troubleshoot model loading issues (visible in debug mode)
+
+**2025.11.12 - Version 2.5.9**
+
+- **🐛 Fix: Tile debug visualization crash** - Fixed OpenCV error when using VAE tile debug mode on certain systems.
+- **🍎 Fix: macOS MPS loading error** - Added automatic CPU fallback for MPS allocator issues on certain PyTorch/macOS versions.
+- **🖥️ Fix: Windows log buffering** - Added flush to print statements for real-time log visibility in ComfyUI on Windows
+- **📦 Fix: ComfyUI Registry logo** - Updated icon URL to display properly in ComfyUI node registry
+- **ℹ️ Feature: Version display** - Added version number to node name and CLI/ComfyUI header for better tracking
+- **💝 Feature: GitHub Sponsors** - Added sponsor button to support project development. Thank you everyone for your support!
+- **📜 License: Apache 2.0** - Reverted License from MIT to Apache 2.0 to match ByteDance Seed project
+
+**2025.11.10 - Version 2.5.8**
+
+- **🐛 Fix (CLI): Windows batch processing duplicate files** - Fixed CLI batch mode processing each file twice on Windows due to case-insensitive filesystem. Improved directory scanning performance by 2-3x
+- **📁 Fix(CLI): Output folder location** - Output files now created in sensible locations: batch mode creates `{folder_name}_upscaled/` sibling folder with original filenames preserved; single file mode adds `_upscaled` suffix in same directory. All logs now show absolute paths for clarity
+- **🎨 Fix(CLI): RGBA alpha channel support** - PNG images with transparency are now properly detected and preserved through the upscaling pipeline, matching ComfyUI behavior
+
+**2025.11.10 - Version 2.5.7**
+
+- **🔧 Fix: Conv3d workaround compatibility** - Enhanced platform detection and added graceful fallback to prevent errors on PyTorch dev builds and AMD ROCm systems
+
+**2025.11.09 - Version 2.5.6**
+
+- 🎨 **Fix: Restored natural look for 7b model** - Corrected torch.compile optimization that was causing overly plastic/ high-specular appearance in upscaled videos with 7b model.
+
+- 💾 **Memory: Fixed RAM leak for long videos** - On-demand reconstruction with lightweight batch indices instead of storing full transformed videos, fixed release_tensor_memory to handle CPU/CUDA/MPS consistently, and refactored batch processing helpers
+
+**2025.11.08 - Version 2.5.4**
+
+- 🎨 **Fix: AdaIN color correction** - Replace `.view()` with `.reshape()` to handle non-contiguous tensors after spatial padding, resolving "view size is not compatible with input tensor's size and stride" error
+- 🔴 **Fix: AMD ROCm compatibility** - Add cuDNN availability check in Conv3d workaround to prevent "ATen not compiled with cuDNN support" error on ROCm systems (AMD GPUs on Windows/Linux)
+
+**2025.11.08 - Version 2.5.3**
+
+- 🍎 **Fix: Apple Silicon MPS device handling** - Corrected MPS device enumeration to use `"mps"` instead of `"mps:0"`, resolving invalid device errors on M-series Macs
+- 🪟 **Fix: torch.mps AttributeError on Windows** - Add defensive checks for `torch.mps.is_available()` to handle PyTorch versions where the method doesn't exist on non-Mac platforms
+
+**2025.11.07 - Version 2.5.0** 🎉
+
+⚠️ **BREAKING CHANGE**: This is a major update requiring workflow recreation. All nodes and CLI parameters have been redesigned for better usability and consistency. Watch the latest video from [AInVFX](https://www.youtube.com/@AInVFX) for a deep dive and check out the [usage](#-usage) section.
+
+**📦 Official Release**: Now available on main branch with ComfyUI Manager support for easy installation and automatic version tracking. Updated dependencies and local imports prevent conflicts with other ComfyUI custom nodes.
+
+### 🎨 ComfyUI Improvements
+
+- **Four-Node Modular Architecture**: Split into dedicated nodes for DiT model, VAE model, torch.compile settings, and main upscaler for granular control
+- **Global Model Cache**: Models now shared across multiple upscaler instances with automatic config updates - no more redundant loading
+- **ComfyUI V3 Migration**: Full compatibility with ComfyUI V3 stateless node design
+- **RGBA Support**: Native alpha channel processing with edge-guided upscaling for clean transparency
+- **Improved Memory Management**: Streaming architecture prevents VRAM spikes regardless of video length
+- **Flexible Resolution Support**: Upscale to any resolution divisible by 2 with lossless padding approach (replaced restrictive cropping)
+- **Enhanced Parameters**: Added `uniform_batch_size`, `temporal_overlap`, `prepend_frames`, and `max_resolution` for better control
+
+### 🖥️ CLI Enhancements
+
+- **Batch Directory Processing**: Process entire folders of videos/images with model caching for efficiency
+- **Single Image Support**: Direct image upscaling without video conversion
+- **Smart Output Detection**: Auto-detects output format (MP4/PNG) based on input type
+- **Enhanced Multi-GPU**: Improved workload distribution with temporal overlap blending
+- **Unified Parameters**: CLI and ComfyUI now use identical parameter names for consistency
+- **Better UX**: Auto-display help, validation improvements, progress tracking, and cleaner output
+
+### ⚡ Performance & Optimization
+
+- **torch.compile Support**: 20-40% DiT speedup and 15-25% VAE speedup with full graph compilation
+- **Optimized BlockSwap**: Adaptive memory clearing (5% threshold), separate I/O component handling, reduced overhead
+- **Enhanced VAE Tiling**: Tensor offload support for accumulation buffers, separate encode/decode configuration
+- **Native Dtype Pipeline**: Eliminated unnecessary conversions, maintains bfloat16 precision throughout for speed and quality
+- **Optimized Tensor Operations**: Replaced einops rearrange with native PyTorch ops for 2-5x faster transforms
+
+### 🎯 Quality Improvements
+
+- **LAB Color Correction**: New perceptual color transfer method with superior color accuracy (now default)
+- **Additional Color Methods**: HSV saturation matching, wavelet adaptive, and hybrid approaches
+- **Deterministic Generation**: Seed-based reproducibility with phase-specific seeding strategy
+- **Better Temporal Consistency**: Hann window blending for smooth transitions between batches
+
+### 💾 Memory Management
+
+- **Smarter Offloading**: Independent device configuration for DiT, VAE, and tensors (CPU/GPU/none)
+- **Four-Phase Pipeline**: Completes each phase (encode→upscale→decode→postprocess) for all batches before moving to next, minimizing model swaps
+- **Better Cleanup**: Phase-specific resource management with proper tensor memory release
+- **Peak VRAM Tracking**: Per-phase memory monitoring with summary display
+
+### 🔧 Technical Improvements
+
+- **GGUF Quantization Support**: Added full GGUF support for 4-bit/8-bit inference on low-VRAM systems
+- **Improved GGUF Handling**: Fixed VRAM leaks, torch.compile compatibility, non-persistent buffers
+- **Apple Silicon Support**: Full MPS (Metal Performance Shaders) support for Apple Silicon Macs
+- **AMD ROCm Compatibility**: Conditional FSDP imports for PyTorch ROCm 7+ support
+- **Conv3d Memory Workaround**: Fixes PyTorch 2.9+ cuDNN memory bug (3x usage reduction)
+- **Flash Attention Optional**: Graceful fallback to SDPA when flash-attn unavailable
+
+### 📚 Code Quality
+
+- **Modular Architecture**: Split monolithic files into focused modules (generation_phases, model_configuration, etc.)
+- **Comprehensive Documentation**: Extensive docstrings with type hints across all modules
+- **Better Error Handling**: Early validation, clear error messages, installation instructions
+- **Consistent Logging**: Unified indentation, better categorization, concise messages
+
+**2025.08.07**
+
+- 🎯 **Unified Debug System**: New structured logging with categories, timers, and memory tracking. `enable_debug` now available on main node
+- ⚡ **Smart FP8 Optimization**: FP8 models now keep native FP8 storage, converting to BFloat16 only for arithmetic - faster and more memory efficient than FP16
+- 📦 **Model Registry**: Multi-repo support (numz/ & AInVFX/), auto-discovery of user models, added mixed FP8 variants to fix 7B artifacts
+- 💾 **Model Caching**: `cache_model` moved to main node, fixed memory leaks with proper RoPE/wrapper cleanup
+- 🧹 **Code Cleanup**: New modular structure (`constants.py`, `model_registry.py`, `debug.py`), removed legacy code
+- 🚀 **Performance**: Better memory management with `torch.cuda.ipc_collect()`, improved RoPE handling
 
 **2025.07.17**
 
@@ -44,23 +164,23 @@ Can run as **Multi-GPU standalone** too, see [🖥️ Run as Standalone](#️-ru
 
 **2025.09.07**
 
-- 🛠️ Blockswap Integration: Big thanks to [Adrien Toupet](https://github.com/adrientoupet) from [AInVFX](https://www.youtube.com/@AInVFX) for this :), usefull for low VRAM users (see [usage](#-usage) section)
+- 🛠️ Blockswap Integration: Big thanks to [Adrien Toupet](https://github.com/adrientoupet) from [AInVFX](https://www.youtube.com/@AInVFX) for this :), useful for low VRAM users (see [usage](#-usage) section)
 
 **2025.07.03**
 
-- 🛠️ Can run as **standalone mode** with **Multi GPU** see [🖥️ Run as Standalone](#️-run-as-standalone)
+- 🛠️ Can run as **standalone mode** with **Multi GPU** see [🖥️ Run as Standalone](#️-run-as-standalone-cli)
 
 **2025.06.30**
 
-- 🚀 Speed Up the process and less VRAM used (see new benchmark).
-- 🛠️ Fixed leak memory on 3B models.
-- ❌ Can now interrupt process if needed.
-- ✅ refactored the code for better sharing with the community, feel free to propose pull requests.
+- 🚀 Speed Up the process and less VRAM used
+- 🛠️ Fixed memory leak on 3B models
+- ❌ Can now interrupt process if needed
+- ✅ Refactored the code for better sharing with the community, feel free to propose pull requests
 - 🛠️ Removed flash attention dependency (thanks to [luke2642](https://github.com/Luke2642) !!)
 
 **2025.06.24**
 
-- 🚀 Speed up the process until x4 (see new benchmark)
+- 🚀 Speed up the process until x4
 
 **2025.06.22**
 
@@ -75,306 +195,721 @@ Can run as **Multi-GPU standalone** too, see [🖥️ Run as Standalone](#️-ru
 
 ## 🎯 Features
 
-- High-quality Upscaling
-- Suitable for any video length once the right settings are found
-- Model Will Be Download Automatically from [Models](https://huggingface.co/numz/SeedVR2_comfyUI/tree/main)
-- Standalone mode
+### Core Capabilities
+- **High-Quality Diffusion-Based Upscaling**: One-step diffusion model for video and image enhancement
+- **Temporal Consistency**: Maintains coherence across video frames with configurable batch processing
+- **Multi-Format Support**: Handles RGB and RGBA (alpha channel) for both videos and images
+- **Any Video Length**: Suitable for any video length
+
+### Model Support
+- **Multiple Model Variants**: 3B and 7B parameter models with different precision options
+- **FP16, FP8, and GGUF Quantization**: Choose between full precision (FP16), mixed precision (FP8), or heavily quantized GGUF models for different VRAM requirements
+- **Automatic Model Downloads**: Models are automatically downloaded from HuggingFace on first use
+
+### Memory Optimization
+- **BlockSwap Technology**: Dynamically swap transformer blocks between GPU and CPU memory to run large models on limited VRAM
+- **VAE Tiling**: Process large resolutions with tiled encoding/decoding to reduce VRAM usage
+- **Intelligent Offloading**: Offload models and intermediate tensors to CPU or secondary GPUs between processing phases
+- **GGUF Quantization Support**: Run models with 4-bit or 8-bit quantization for extreme VRAM savings
+
+### Performance Features
+- **torch.compile Integration**: Optional 20-40% DiT speedup and 15-25% VAE speedup with PyTorch 2.0+ compilation
+- **Multi-GPU CLI**: Distribute workload across multiple GPUs with automatic temporal overlap blending
+- **Model Caching**: Keep models loaded in memory for faster batch processing
+- **Flexible Attention Backends**: Choose between PyTorch SDPA (stable, always available) or Flash Attention 2 (faster on supported hardware)
+
+### Quality Control
+- **Advanced Color Correction**: Five methods including LAB (recommended for highest fidelity), wavelet, wavelet adaptive, HSV, and AdaIN
+- **Noise Injection Controls**: Fine-tune input and latent noise scales for artifact reduction at high resolutions
+- **Configurable Resolution Limits**: Set target and maximum resolutions with automatic aspect ratio preservation
+
+### Workflow Features
+- **ComfyUI Integration**: Four dedicated nodes for complete control over the upscaling pipeline
+- **Standalone CLI**: Command-line interface for batch processing and automation
+- **Debug Logging**: Comprehensive debug mode with memory tracking, timing information, and processing details
+- **Progress Reporting**: Real-time progress updates during processing
 
 ## 🔧 Requirements
 
-- A Huge VRAM capabilities is better, from my test, even the 3B version need a lot of VRAM at least 18GB.
-- Last ComfyUI version with python 3.12.9 (may be works with older versions but I haven't test it)
+### Hardware
+
+With the current optimizations (tiling, BlockSwap, GGUF quantization), SeedVR2 can run on a wide range of hardware:
+
+- **Minimal VRAM** (8GB or less): Use GGUF Q4_K_M models with BlockSwap and VAE tiling enabled
+- **Moderate VRAM** (12-16GB): Use FP8 models with BlockSwap or VAE tiling as needed
+- **High VRAM** (24GB+): Use FP16 models for best quality and speed without memory optimizations
+
+### Software
+
+- **ComfyUI**: Latest version recommended
+- **Python**: 3.12+ (Python 3.12 and 3.13 tested and recommended)
+- **PyTorch**: 2.0+ for torch.compile support (optional but recommended)
+- **Triton**: Required for torch.compile with inductor backend (optional)
+- **Flash Attention 2**: Provides faster attention computation on supported hardware (optional, falls back to PyTorch SDPA)
 
 ## 📦 Installation
 
-Directly accessible from Comfyui-Manager, search "seedvr2" and click "Install" and restart.
+### Option 1: ComfyUI Manager (Recommended)
 
-OR
+1. Open ComfyUI Manager in your ComfyUI interface
+2. Click "Custom Nodes Manager"
+3. Search for "ComfyUI-SeedVR2_VideoUpscaler"
+4. Click "Install" and restart ComfyUI
 
-1. Clone this repository into your ComfyUI custom nodes directory:
+**Registry Link**: [ComfyUI Registry - SeedVR2 Video Upscaler](https://registry.comfy.org/nodes/seedvr2_videoupscaler)
 
+### Option 2: Manual Installation
+
+1. **Clone the repository** into your ComfyUI custom nodes directory:
 ```bash
-cd ComfyUI/custom_nodes
-git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git
+cd ComfyUI
+git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git custom_nodes/seedvr2_videoupscaler
 ```
 
-2. Install the required dependencies:
-
-load venv and :
-
+2. **Install dependencies using standalone Python**:
 ```bash
-pip install -r ComfyUI-SeedVR2_VideoUpscaler/requirements.txt
+# Install requirements (from same ComfyUI directory)
+# Windows:
+.venv\Scripts\python.exe -m pip install -r custom_nodes\seedvr2_videoupscaler\requirements.txt
+# Linux/macOS:
+.venv/bin/python -m pip install -r custom_nodes/seedvr2_videoupscaler/requirements.txt
 ```
 
-install flash_attn/triton, 6% faster on process, not a mandatory.
+3. **Restart ComfyUI**
 
-```bash
-pip install flash_attn
-pip install triton
-```
+### Model Installation
 
-or
+Models will be **automatically downloaded** on first use and saved to `ComfyUI/models/SEEDVR2`.
 
-```bash
-python_embeded\python.exe -m pip install -r flash_attn
-```
-
-check here from https://github.com/loscrossos/lib_flashattention/releases and https://github.com/woct0rdho/triton-windows
-
-3. Models
-
-   Will be automtically download into :
-   `models/SEEDVR2`
-
-   or can be found here ([MODELS](https://huggingface.co/numz/SeedVR2_comfyUI/tree/main))
+You can also manually download models from:
+- Main models available at [numz/SeedVR2_comfyUI](https://huggingface.co/numz/SeedVR2_comfyUI/tree/main) and [AInVFX/SeedVR2_comfyUI](https://huggingface.co/AInVFX/SeedVR2_comfyUI/tree/main)
+- Additional GGUF models available at [cmeka/SeedVR2-GGUF](https://huggingface.co/cmeka/SeedVR2-GGUF/tree/main)
 
 ## 📖 Usage
 
-### 🎬 Video tutorial
+### 🎬 Video Tutorials
 
-Learn everything about SeedVR2 in this comprehensive tutorial by Adrien from [AInVFX](https://www.youtube.com/@AInVFX), covering ComfyUI setup, BlockSwap for consumer GPUs, alpha workflows, and production tips:
+#### Latest Version Deep Dive (Recommended)
+
+Complete walkthrough of version 2.5 by Adrien from [AInVFX](https://www.youtube.com/@AInVFX), covering the new 4-node architecture, GGUF support, memory optimizations, and production workflows:
+
+[![SeedVR2 v2.5 Deep Dive Tutorial](https://img.youtube.com/vi/MBtWYXq_r60/maxresdefault.jpg)](https://youtu.be/MBtWYXq_r60)
+
+This comprehensive tutorial covers:
+- Installing v2.5 through ComfyUI Manager and troubleshooting conflicts
+- Understanding the new 4-node modular architecture and why we rebuilt it
+- Running 7B models on 8GB VRAM with GGUF quantization
+- Configuring BlockSwap, VAE tiling, and torch.compile for your hardware
+- Image and video upscaling workflows with alpha channel support
+- CLI for batch processing and multi-GPU rendering
+- Memory optimization strategies for different VRAM levels
+- Real production tips and the critical batch_size formula (4n+1)
+
+#### Previous Version Tutorial
+
+For reference, here's the original tutorial covering the initial release:
 
 [![SeedVR2 Deep Dive Tutorial](https://img.youtube.com/vi/I0sl45GMqNg/maxresdefault.jpg)](https://youtu.be/I0sl45GMqNg)
 
-### Node setup
+*Note: This tutorial covers the previous single-node architecture. While the UI has changed significantly in v2.5, the core concepts about BlockSwap and memory management remain valuable.*
 
-1. In ComfyUI, locate the **SeedVR2 Video Upscaler** node in the node menu.
+### Node Setup
 
-<img src="docs/node.png" width="100%">
+SeedVR2 uses a modular node architecture with four specialized nodes:
 
-2. ⚠️ **THINGS TO KNOW !!**
+#### 1. SeedVR2 (Down)Load DiT Model
 
-**temporal consistency** : at least a **batch_size** of 5 is required to activate temporal consistency. SEEDVR2 need at least 5 frames to calculate it. A higher batch_size give better performances/results but need more than 24GB VRAM.
+![SeedVR2 (Down)Load DiT Model](docs/dit_model_loader.png)
 
-**VRAM usage** : The input video resolution impacts VRAM consumption during the process. The larger the input video, the more VRAM will consume during the process. So, if you experience OOMs with a batch_size of at least 5, try reducing the input video resolution until it resolves.
+Configure the DiT (Diffusion Transformer) model for video upscaling.
 
-Of course, the output resolution also has an impact, so if your hardware doesn't allow it, reduce the output resolution.
+**Parameters:**
 
-3. Configure the node parameters:
+- **model**: Choose your DiT model
+  - **3B Models**: Faster, lower VRAM requirements
+    - `seedvr2_ema_3b_fp16.safetensors`: FP16 (best quality)
+    - `seedvr2_ema_3b_fp8_e4m3fn.safetensors`: FP8 8-bit (good quality)
+    - `seedvr2_ema_3b-Q4_K_M.gguf`: GGUF 4-bit quantized (acceptable quality)
+    - `seedvr2_ema_3b-Q8_0.gguf`: GGUF 8-bit quantized (good quality)
+  - **7B Models**: Higher quality, higher VRAM requirements
+    - `seedvr2_ema_7b_fp16.safetensors`: FP16 (best quality)
+    - `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors`: FP8 with last block in FP16 to reduce artifacts (good quality)
+    - `seedvr2_ema_7b-Q4_K_M.gguf`: GGUF 4-bit quantized (acceptable quality)
+    - `seedvr2_ema_7b_sharp_*`: Sharp variants for enhanced detail
 
-   - `model`: Select your 3B or 7B model
-   - `seed`: a seed but it generate another seed from this one
-   - `new_resolution`: New desired short edge in px, will keep ratio on other edge
-   - `batch_size`: VERY IMPORTANT!, this model consume a lot of VRAM, All your VRAM, even for the 3B model, so for GPU under 24GB VRAM keep this value Low, good value is "1" without temporal consistency, "5" for temporal consistency, but higher is this value better is the result.
-   - `preserve_vram`: for VRAM < 24GB, If true, It will unload unused models during process, longer but works, otherwise probably OOM with
-   
-4. 🧩 **BlockSwap Configuration (Optional - For Limited VRAM)**
+- **device**: GPU device for DiT inference (e.g., `cuda:0`)
 
-   <img src="docs/BlockSwap.png" width="100%">
+- **offload_device**: Device to offload DiT model when not actively processing
+  - `none`: Keep model on inference device (fastest, highest VRAM)
+  - `cpu`: Offload to system RAM (reduces VRAM)
+  - `cuda:X`: Offload to another GPU (good balance if available)
 
-   BlockSwap enables running large models on GPUs with limited VRAM by dynamically swapping transformer blocks between GPU and CPU memory during inference.
+- **cache_model**: Keep DiT model loaded on offload_device between workflow runs
+  - Useful for batch processing to avoid repeated loading
+  - Requires offload_device to be set
 
-   **To enable BlockSwap:**
-   - Add the **SEEDVR2 BlockSwap Config** node to your workflow
-   - Connect its output to the `block_swap_config` input of the SeedVR2 Video Upscaler node
+- **blocks_to_swap**: BlockSwap memory optimization
+  - `0`: Disabled (default)
+  - `1-32`: Number of transformer blocks to swap for 3B model
+  - `1-36`: Number of transformer blocks to swap for 7B model
+  - Higher values = more VRAM savings but slower processing
+  - Requires offload_device to be set and different from device
 
-   **BlockSwap parameters:**
-   - `blocks_to_swap` (0-32 for 3B model, 0-36 for 7B model): Number of transformer blocks to offload
-     - 0 = Disabled (fastest, highest VRAM)
-     - 16 = Balanced (moderate speed/VRAM trade-off)
-     - 32-36 = Maximum savings (slowest, lowest VRAM)
-   - `offload_io_components`: Move embeddings/IO layers to CPU (additional VRAM savings, slower)
-   - `use_non_blocking`: Asynchronous GPU transfers (keep True for better performance)
-   - `cache_model`: Keep model in RAM between runs (faster for batch processing)
-   - `enable_debug`: Show detailed memory usage and timing
+- **swap_io_components**: Offload input/output embeddings and normalization layers
+  - Additional VRAM savings when combined with blocks_to_swap
+  - Requires offload_device to be set and different from device
 
-   **Finding optimal settings:**
-   - Start with `blocks_to_swap=16`, increase if you get OOM errors, decrease if you have spare VRAM
-   - Enable debug mode to monitor memory usage
-   - The first 1-2 blocks might show longer swap times - this is normal
-   - Combine with `preserve_vram=True` for maximum memory savings
+- **attention_mode**: Attention computation backend
+  - `sdpa`: PyTorch scaled_dot_product_attention (default, stable, always available)
+  - `flash_attn`: Flash Attention 2 (faster on supported hardware, requires flash-attn package)
 
-## 🖥️ Run as Standalone
+- **torch_compile_args**: Connect to SeedVR2 Torch Compile Settings node for 20-40% speedup
 
-You can also run SeedVR2 Video Upscaler as a standalone Multi-GPU support script without ComfyUI. This is useful for batch processing or when you prefer command-line operation or want to use multi-GPU.
+**BlockSwap Explained:**
 
-### Prerequisites for Standalone
+BlockSwap enables running large models on GPUs with limited VRAM by dynamically swapping transformer blocks between GPU and CPU memory during inference. Here's how it works:
 
-1. Need python 3.12.9 (I haven't test with other version, must works)
-2. **clone the repository**
+- **What it does**: Keeps only the currently-needed transformer blocks on the GPU, while storing the rest on CPU or another device
+- **When to use it**: When you get OOM (Out of Memory) errors during the upscaling phase
+- **How to configure**:
+  1. Set `offload_device` to `cpu` or another GPU
+  2. Start with `blocks_to_swap=16` (half the blocks)
+  3. If still getting OOM, increase to 24 or 32 (3B) / 36 (7B)
+  4. Enable `swap_io_components` for maximum VRAM savings
+  5. If you have plenty of VRAM, decrease or set to 0 for faster processing
 
+**Example Configuration for Low VRAM (8GB)**:
+- model: `seedvr2_ema_3b-Q8_0.gguf`
+- device: `cuda:0`
+- offload_device: `cpu`
+- blocks_to_swap: `32`
+- swap_io_components: `True`
+
+#### 2. SeedVR2 (Down)Load VAE Model
+
+![SeedVR2 (Down)Load VAE Model](docs/vae_model_loader.png)
+
+Configure the VAE (Variational Autoencoder) model for encoding/decoding video frames.
+
+**Parameters:**
+
+- **model**: VAE model selection
+  - `ema_vae_fp16.safetensors`: Default and recommended
+
+- **device**: GPU device for VAE inference (e.g., `cuda:0`)
+
+- **offload_device**: Device to offload VAE model when not actively processing
+  - `none`: Keep model on inference device (default, fastest)
+  - `cpu`: Offload to system RAM (reduces VRAM)
+  - `cuda:X`: Offload to another GPU (good balance if available)
+
+- **cache_model**: Keep VAE model loaded on offload_device between workflow runs
+  - Requires offload_device to be set
+
+- **encode_tiled**: Enable tiled encoding to reduce VRAM usage during encoding phase
+  - Enable if you see OOM errors during the "Encoding" phase in debug logs
+
+- **encode_tile_size**: Encoding tile size in pixels (default: 1024)
+  - Applied to both height and width
+  - Lower values reduce VRAM but may increase processing time
+
+- **encode_tile_overlap**: Encoding tile overlap in pixels (default: 128)
+  - Reduces visible seams between tiles
+
+- **decode_tiled**: Enable tiled decoding to reduce VRAM usage during decoding phase
+  - Enable if you see OOM errors during the "Decoding" phase in debug logs
+
+- **decode_tile_size**: Decoding tile size in pixels (default: 1024)
+
+- **decode_tile_overlap**: Decoding tile overlap in pixels (default: 128)
+
+- **torch_compile_args**: Connect to SeedVR2 Torch Compile Settings node for 15-25% speedup
+
+**VAE Tiling Explained:**
+
+VAE tiling processes large resolutions in smaller tiles to reduce VRAM requirements. Here's how to use it:
+
+1. **Run without tiling first** and monitor the debug logs (enable `enable_debug` on main node)
+2. **If OOM during "Encoding" phase**:
+   - Enable `encode_tiled`
+   - If still OOM, reduce `encode_tile_size` (try 768, 512, etc.)
+3. **If OOM during "Decoding" phase**:
+   - Enable `decode_tiled`
+   - If still OOM, reduce `decode_tile_size`
+4. **Adjust overlap** (default 128) if you see visible seams in output (increase it) or processing times are too slow (decrease it).
+
+**Example Configuration for High Resolution (4K)**:
+- encode_tiled: `True`
+- encode_tile_size: `1024`
+- encode_tile_overlap: `128`
+- decode_tiled: `True`
+- decode_tile_size: `1024`
+- decode_tile_overlap: `128`
+
+#### 3. SeedVR2 Torch Compile Settings (Optional)
+
+![SeedVR2 Torch Compile Settings](docs/torch_compile_settings.png)
+
+Configure torch.compile optimization for 20-40% DiT speedup and 15-25% VAE speedup.
+
+**Requirements:**
+- PyTorch 2.0+
+- Triton (for inductor backend)
+
+**Parameters:**
+
+- **backend**: Compilation backend
+  - `inductor`: Full optimization with Triton kernel generation and fusion (recommended)
+  - `cudagraphs`: Lightweight wrapper using CUDA graphs, no kernel optimization
+
+- **mode**: Optimization level (compilation time vs runtime performance)
+  - `default`: Fast compilation with good speedup (recommended for development)
+  - `reduce-overhead`: Lower overhead, optimized for smaller models
+  - `max-autotune`: Slowest compilation, best runtime performance (recommended for production)
+  - `max-autotune-no-cudagraphs`: Like max-autotune but without CUDA graphs
+
+- **fullgraph**: Compile entire model as single graph without breaks
+  - `False`: Allow graph breaks for better compatibility (default, recommended)
+  - `True`: Enforce no breaks for maximum optimization (may fail with dynamic shapes)
+
+- **dynamic**: Handle varying input shapes without recompilation
+  - `False`: Specialize for exact input shapes (default)
+  - `True`: Create dynamic kernels that adapt to shape variations (enable when processing different resolutions or batch sizes)
+
+- **dynamo_cache_size_limit**: Max cached compiled versions per function (default: 64)
+  - Higher = more memory, lower = more recompilation
+
+- **dynamo_recompile_limit**: Max recompilation attempts before falling back to eager mode (default: 128)
+  - Safety limit to prevent compilation loops
+
+**Usage:**
+1. Add this node to your workflow
+2. Connect its output to the `torch_compile_args` input of DiT and/or VAE loader nodes
+3. First run will be slow (compilation), subsequent runs will be much faster
+
+**When to use:**
+- torch.compile only makes sense when processing **multiple batches, long videos, or many tiles**
+- For single images or short clips, the compilation time outweighs the speed improvement
+- Best suited for batch processing workflows or long videos
+
+**Recommended Settings:**
+- For development/testing: `mode=default`, `backend=inductor`, `fullgraph=False`
+- For production: `mode=max-autotune`, `backend=inductor`, `fullgraph=False`
+
+#### 4. SeedVR2 Video Upscaler (Main Node)
+
+![SeedVR2 Video Upscaler](docs/video_upscaler.png)
+
+Main upscaling node that processes video frames using DiT and VAE models.
+
+**Required Inputs:**
+
+- **image**: Input video frames as image batch (RGB or RGBA format)
+- **dit**: DiT model configuration from SeedVR2 (Down)Load DiT Model node
+- **vae**: VAE model configuration from SeedVR2 (Down)Load VAE Model node
+
+**Parameters:**
+
+- **seed**: Random seed for reproducible generation (default: 42)
+  - Same seed with same inputs produces identical output
+
+- **resolution**: Target resolution for shortest edge in pixels (default: 1080)
+  - Maintains aspect ratio automatically
+
+- **max_resolution**: Maximum resolution for any edge (default: 0 = no limit)
+  - Automatically scales down if exceeded to prevent OOM
+
+- **batch_size**: Frames per batch (default: 5)
+  - **CRITICAL REQUIREMENT**: Must follow the **4n+1 formula** (1, 5, 9, 13, 17, 21, 25, ...)
+  - **Why this matters**: The model uses these frames for temporal consistency calculations
+  - **Minimum 5 for temporal consistency**: Use 1 only for single images or when temporal consistency isn't needed
+  - **Match shot length ideally**: For best results, set batch_size to match your shot length (e.g., batch_size=21 for a 20-frame shot)
+  - **VRAM impact**: Higher batch_size = better quality and speed but requires more VRAM
+  - **If you get OOM with batch_size=5**: Try optimization techniques first (model offloading, BlockSwap, GGUF models...) before reducing batch_size or input resolution, as these directly impact quality
+
+**uniform_batch_size** (default: False)
+  - Pads the final batch to match `batch_size` for uniform processing
+  - Prevents temporal artifacts when the last batch is significantly smaller than others
+  - Example: 45 frames with `batch_size=33` creates [33, 33] instead of [33, 12]
+  - Recommended when using large batch sizes and video length is not a multiple of `batch_size`
+  - Increases VRAM usage slightly but ensures consistent temporal coherence across all batches
+
+- **temporal_overlap**: Overlapping frames between batches (default: 0)
+  - Used for blending between batches to reduce temporal artifacts
+  - Range: 0-16 frames
+
+- **prepend_frames**: Frames to prepend (default: 0)
+  - Prepends reversed frames to reduce artifacts at video start
+  - Automatically removed after processing
+  - Range: 0-32 frames
+
+- **color_correction**: Color correction method (default: "wavelet")
+  - **`lab`**: Full perceptual color matching with detail preservation (recommended for highest fidelity to original)
+  - **`wavelet`**: Frequency-based natural colors, preserves details well
+  - **`wavelet_adaptive`**: Wavelet base + targeted saturation correction
+  - **`hsv`**: Hue-conditional saturation matching
+  - **`adain`**: Statistical style transfer
+  - **`none`**: No color correction
+
+- **input_noise_scale**: Input noise injection scale 0.0-1.0 (default: 0.0)
+  - Adds noise to input frames to reduce artifacts at very high resolutions
+  - Try 0.1-0.3 if you see artifacts with high output resolutions
+
+- **latent_noise_scale**: Latent space noise scale 0.0-1.0 (default: 0.0)
+  - Adds noise during diffusion process, can soften excessive detail
+  - Use if input_noise doesn't help, try 0.05-0.15
+
+- **offload_device**: Device for storing intermediate tensors between processing phases (default: "cpu")
+  - `none`: Keep all tensors on inference device (fastest but highest VRAM)
+  - `cpu`: Offload to system RAM (recommended for long videos, slower transfers)
+  - `cuda:X`: Offload to another GPU (good balance if available, faster than CPU)
+
+- **enable_debug**: Enable detailed debug logging (default: False)
+  - Shows memory usage, timing information, and processing details
+  - **Highly recommended** for troubleshooting OOM issues
+
+**Output:**
+- Upscaled video frames with color correction applied
+- Format (RGB/RGBA) matches input
+- Range [0, 1] normalized for ComfyUI compatibility
+
+### Typical Workflow Setup
+
+**Basic Workflow (High VRAM - 24GB+)**:
 ```
-git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler SeedVR2_VideoUpscaler
-cd SeedVR2_VideoUpscaler
+Load Video Frames
+    ↓
+SeedVR2 Load DiT Model
+  ├─ model: seedvr2_ema_3b_fp16.safetensors
+  └─ device: cuda:0
+    ↓
+SeedVR2 Load VAE Model
+  ├─ model: ema_vae_fp16.safetensors
+  └─ device: cuda:0
+    ↓
+SeedVR2 Video Upscaler
+  ├─ batch_size: 21
+  └─ resolution: 1080
+    ↓
+Save Video/Frames
 ```
 
-3. **install python and create env** prefer python 3.12.9
-
+**Low VRAM Workflow (8-12GB)**:
+```
+Load Video Frames
+    ↓
+SeedVR2 Load DiT Model
+  ├─ model: seedvr2_ema_3b-Q8_0.gguf
+  ├─ device: cuda:0
+  ├─ offload_device: cpu
+  ├─ blocks_to_swap: 32
+  └─ swap_io_components: True
+    ↓
+SeedVR2 Load VAE Model
+  ├─ model: ema_vae_fp16.safetensors
+  ├─ device: cuda:0
+  ├─ encode_tiled: True
+  └─ decode_tiled: True
+    ↓
+SeedVR2 Video Upscaler
+  ├─ batch_size: 5
+  └─ resolution: 720
+    ↓
+Save Video/Frames
 ```
 
-conda create -n seedvr python=3.12.9
-conda activate seedvr
-
-or
-
-python -m venv venv
-
-windows :
-.\venv\Scripts\activate
-
-linux :
-source ./venv/bin/activate
+**High Performance Workflow (24GB+ with torch.compile)**:
+```
+Load Video Frames
+    ↓
+SeedVR2 Torch Compile Settings
+  ├─ mode: max-autotune
+  └─ backend: inductor
+    ↓
+SeedVR2 Load DiT Model
+  ├─ model: seedvr2_ema_7b_sharp_fp16.safetensors
+  ├─ device: cuda:0
+  └─ torch_compile_args: connected
+    ↓
+SeedVR2 Load VAE Model
+  ├─ model: ema_vae_fp16.safetensors
+  ├─ device: cuda:0
+  └─ torch_compile_args: connected
+    ↓
+SeedVR2 Video Upscaler
+  ├─ batch_size: 81
+  └─ resolution: 1080
+    ↓
+Save Video/Frames
 ```
 
-2. **Install requirements** for standalone operation:
+## 🖥️ Run as Standalone (CLI)
 
-```
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
-pip install -r requirements.txt
-```
+The standalone CLI provides powerful batch processing capabilities with multi-GPU support and sophisticated optimization options.
 
-### Comandline Usage
+### Prerequisites
 
-```
-usage: inference_cli.py [-h]
-   --video_path VIDEO_PATH
-   [--seed SEED]
-   [--resolution RESOLUTION]
-   [--batch_size BATCH_SIZE]
-   [--model {
-      seedvr2_ema_3b_fp16.safetensors,
-      seedvr2_ema_3b_fp8_e4m3fn.safetensors,
-      seedvr2_ema_7b_fp16.safetensors,
-      seedvr2_ema_7b_fp8_e4m3fn.safetensors}]
-   [--model_dir MODEL_DIR]
-   [--skip_first_frames SKIP_FIRST_FRAMES]
-   [--load_cap LOAD_CAP]
-   [--output OUTPUT]
-   [--output_format {video,png}]
-   [--cuda_device CUDA_DEVICE]
-   [--preserve_vram]
-   [--debug]
+Choose the appropriate setup based on your installation:
 
+#### Option 1: Already Have ComfyUI with SeedVR2 Installed
 
-options:
-  -h, --help                              show this help message and exit
-  --video_path VIDEO_PATH                 Path to input video file
-  --seed SEED                             Random seed for generation (default: 100)
-  --resolution RESOLUTION                 Target resolution width (default: 1072)
-  --batch_size BATCH_SIZE                 Number of frames per batch (default: 5)
-  --model                                 Model to use (default: 3B FP8) in list:
-                                             seedvr2_ema_3b_fp16.safetensors,
-                                             seedvr2_ema_3b_fp8_e4m3fn.safetensors,
-                                             seedvr2_ema_7b_fp16.safetensors,
-                                             seedvr2_ema_7b_fp8_e4m3fn.safetensors
-  --model_dir MODEL_DIR                   Directory containing the model files (default: seedvr2_models)
-  --skip_first_frames SKIP_FIRST_FRAMES   Skip the first frames during processing
-  --load_cap LOAD_CAP                     Maximum number of frames to load from video (default: load all)
-  --output OUTPUT                         Output video path (default: auto-generated)
-  --output_format {video,png}             Output format: 'video' (mp4) or 'png' images (default: video)
-  --cuda_device CUDA_DEVICE               CUDA device id(s). Single id (e.g., '0') or comma-separated list '0,1' for multi-GPU
-  --preserve_vram                         Enable VRAM preservation mode
-  --debug                                 Enable debug logging
+If you've already installed SeedVR2 as part of ComfyUI (via [ComfyUI installation](#-installation)), you can use the CLI directly:
 
+```bash
+# Navigate to your ComfyUI directory
+cd ComfyUI
+
+# Run the CLI using standalone Python (display help message)
+# Windows:
+.venv\Scripts\python.exe custom_nodes\seedvr2_videoupscaler\inference_cli.py --help
+# Linux/macOS:
+.venv/bin/python custom_nodes/seedvr2_videoupscaler/inference_cli.py --help
 ```
 
-Examples :
+**Skip to [Command Line Usage](#command-line-usage) below.**
 
+#### Option 2: Standalone Installation (Without ComfyUI)
+
+If you want to use the CLI without ComfyUI installation, follow these steps:
+
+1. **Install [uv](https://docs.astral.sh/uv/getting-started/installation/)** (modern Python package manager):
+```bash
+# Windows
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# macOS and Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
-# Upscale 18 frames as png
-python inference_cli.py --video_path "MAIN.mp4" --resolution 1072 --batch_size 9 --model seedvr2_ema_3b_fp8_e4m3fn.safetensors --model_dir ./models\SEEDVR2 --load_cap 18 --output "C:\Users\Emmanuel\Downloads\test_upscale" --output_format png --preserve_vram
 
-# Upscale 1000 frames on 4 GPU, each GPU will receive 250 frames and will process them 50 by 50
-python inference_cli.py --video_path "MAIN.mp4" --batch_size 50 --load_cap 1000 --output ".\outputs\test_upscale.mp4" --cuda_device 0,1,2,3
-
+2. **Clone the repository**:
+```bash
+git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git seedvr2_videoupscaler
+cd seedvr2_videoupscaler
 ```
 
-## 📊 Benchmarks
+3. **Create virtual environment and install dependencies**:
+```bash
+# Create virtual environment with Python 3.13
+uv venv --python 3.13
 
-**7B models on NVIDIA H100 93GB VRAM** (values in parentheses are from the previous benchmark):
+# Activate virtual environment
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
 
-| nb frames | Resolution          | Batch Size | execution time fp8 (s) | FPS fp8     | execution time fp16 (s) | FPS fp16           | perf progress since start |
-| --------- | ------------------- | ---------- | ---------------------- | ----------- | ----------------------- | ------------------ | ------------------------- |
-| 15        | 512×768 → 1080×1620 | 5          | 23.75 (26.71)          | 0.63 (0.56) | 24.23 (27.75)           | 0.61 (0.54) (0.10) | x6.1                      |
-| 27        | 512×768 → 1080×1620 | 9          | 27.75 (33.97)          | 0.97 (0.79) | 28.48 (35.08)           | 0.94 (0.77) (0.15) | x6.2                      |
-| 39        | 512×768 → 1080×1620 | 13         | 32.02 (41.01)          | 1.21 (0.95) | 32.62 (42.08)           | 1.19 (0.93) (0.19) | x6.2                      |
-| 51        | 512×768 → 1080×1620 | 17         | 36.39 (48.12)          | 1.40 (1.06) | 37.30 (49.44)           | 1.36 (1.03) (0.21) | x6.4                      |
-| 63        | 512×768 → 1080×1620 | 21         | 40.80 (55.40)          | 1.54 (1.14) | 41.32 (56.70)           | 1.52 (1.11) (0.23) | x6.6                      |
-| 75        | 512×768 → 1080×1620 | 25         | 45.37 (62.60)          | 1.65 (1.20) | 45.79 (63.80)           | 1.63 (1.18) (0.24) | x6.8                      |
-| 123       | 512×768 → 1080×1620 | 41         | 62.44 (91.38)          | 1.96 (1.35) | 62.28 (92.90)           | 1.97 (1.32) (0.28) | x7.0                      |
-| 243       | 512×768 → 1080×1620 | 81         | 106.13 (164.25)        | 2.28 (1.48) | 104.68 (166.09)         | 2.32 (1.46) (0.31) | x7.4                      |
-| 363       | 512×768 → 1080×1620 | 121        | 151.01 (238.18)        | 2.40 (1.52) | 148.67 (239.80)         | 2.44 (1.51) (0.33) | x7.4                      |
-| 453       | 512×768 → 1080×1620 | 151        | 186.98 (296.52)        | 2.42 (1.53) | 184.11 (298.65)         | 2.46 (1.52) (0.33) | x7.4                      |
-| 633       | 512×768 → 1080×1620 | 211        | 253.77 (406.65)        | 2.49 (1.56) | 249.43 (409.44)         | 2.53 (1.55) (0.34) | x7.4                      |
-| 903       | 512×768 → 1080×1620 | 301        | OOM (OOM)              | (OOM)       | OOM (OOM)               | (OOM) (OOM)        |                           |
-| 149       | 854x480 → 1920x1080 | 149        |                        |             | 450.22                  | 0.41               |                           |
+# Install PyTorch with CUDA support
+# Check command line based on your environment: https://pytorch.org/get-started/locally/
+uv pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu130
 
-**3B FP8 models on NVIDIA H100 93GB VRAM** (values in parentheses are from the previous benchmark):
+# Install SeedVR2 requirements
+uv pip install -r requirements.txt
 
-| nb frames | Resolution          | Batch Size | execution time fp8 (s) | FPS fp8 | execution time fp16 (s) | FPS fp16 |
-| --------- | ------------------- | ---------- | ---------------------- | ------- | ----------------------- | -------- |
-| 149       | 854x480 → 1920x1080 | 149        | 361.22                 | 0.41    |                         |          |
+# Run the CLI (display help message)
+# Windows:
+.venv\Scripts\python.exe inference_cli.py --help
+# Linux/macOS:
+.venv/bin/python inference_cli.py --help
+```
 
-**NVIDIA RTX4090 24GB VRAM**
+### Command Line Usage
 
-| Model   | nb frames | Resolution          | Batch Size | execution time (seconds) | FPS         | Note                                     |
-| ------- | --------- | ------------------- | ---------- | ------------------------ | ----------- | ---------------------------------------- |
-| 3B fp8  | 5         | 512x768 → 1080x1620 | 1          | 14.66 (22.52)            | 0.34 (0.22) |                                          |
-| 3B fp16 | 5         | 512x768 → 1080x1620 | 1          | 17.02 (27.84)            | 0.29 (0.18) |                                          |
-| 7B fp8  | 5         | 512x768 → 1080x1620 | 1          | 46.23 (75.51)            | 0.11 (0.07) | preserve_memory=on                       |
-| 7B fp16 | 5         | 512x768 → 1080x1620 | 1          | 43.58 (78.93)            | 0.11 (0.06) | preserve_memory=on                       |
-| 3B fp8  | 10        | 512x768 → 1080x1620 | 5          | 39.75                    | 0.25        | preserve_memory=on                       |
-| 3B fp8  | 100       | 512x768 → 1080x1620 | 5          | 322.77                   | 0.31        | preserve_memory=on                       |
-| 3B fp8  | 1000      | 512x768 → 1080x1620 | 5          | 3624.08                  | 0.28        | preserve_memory=on                       |
-| 3B fp8  | 20        | 512x768 → 1080x1620 | 1          | 40.71 (65.40)            | 0.49 (0.31) |                                          |
-| 3B fp16 | 20        | 512x768 → 1080x1620 | 1          | 44.76 (91.12)            | 0.45 (0.22) |                                          |
-| 3B fp8  | 20        | 512x768 → 1280x1920 | 1          | 61.14 (89.10)            | 0.33 (0.22) |                                          |
-| 3B fp8  | 20        | 512x768 → 1480x2220 | 1          | 79.66 (136.08)           | 0.25 (0.15) |                                          |
-| 3B fp8  | 20        | 512x768 → 1620x2430 | 1          | 125.79 (191.28)          | 0.16 (0.10) | preserve_memory=off (preserve_memory=on) |
-| 3B fp8  | 149       | 854x480 → 1920x1080 | 5          | 782.76                   | 0.19        | preserve_memory=on                       |
+The CLI provides comprehensive options for single-GPU, multi-GPU, and batch processing workflows.
+
+**Basic Usage Examples:**
+
+```bash
+# Basic image upscaling
+python inference_cli.py image.jpg
+
+# Basic video video upscaling with temporal consistency
+python inference_cli.py video.mp4 --resolution 720 --batch_size 33
+
+# Multi-GPU processing with temporal overlap
+python inference_cli.py video.mp4 \
+    --cuda_device 0,1 \
+    --resolution 1080 \
+    --batch_size 81 \
+    --uniform_batch_size \
+    --temporal_overlap 3 \
+    --prepend_frames 4
+
+# Memory-optimized for low VRAM (8GB)
+python inference_cli.py image.png \
+    --dit_model seedvr2_ema_3b-Q8_0.gguf \
+    --resolution 1080 \
+    --blocks_to_swap 32 \
+    --swap_io_components \
+    --dit_offload_device cpu \
+    --vae_offload_device cpu
+
+# High resolution with VAE tiling
+python inference_cli.py video.mp4 \
+    --resolution 1440 \
+    --batch_size 31 \
+    --uniform_batch_size \
+    --temporal_overlap 3 \
+    --vae_encode_tiled \
+    --vae_decode_tiled
+
+# Batch directory processing with model caching
+python inference_cli.py media_folder/ \
+    --output processed/ \
+    --cuda_device 0 \
+    --cache_dit \
+    --cache_vae \
+    --dit_offload_device cpu \
+    --vae_offload_device cpu \
+    --resolution 1080 \
+    --max_resolution 1920
+```
+
+### Command Line Arguments
+
+**Input/Output:**
+- `<input>`: Input file (.mp4, .avi, .png, .jpg, etc.) or directory
+- `--output`: Output path (default: auto-generated in 'output/' directory)
+- `--output_format`: Output format: 'mp4' (video) or 'png' (image sequence). Default: auto-detect from input type
+- `--model_dir`: Model directory (default: ./models/SEEDVR2)
+
+**Model Selection:**
+- `--dit_model`: DiT model to use. Options: 3B/7B with fp16/fp8/GGUF variants (default: 3B FP8)
+
+**Processing Parameters:**
+- `--resolution`: Target short-side resolution in pixels (default: 1080)
+- `--max_resolution`: Maximum resolution for any edge. Scales down if exceeded. 0 = no limit (default: 0)
+- `--batch_size`: Frames per batch (must follow 4n+1: 1, 5, 9, 13, 17, 21...). Ideally matches shot length for best temporal consistency (default: 5)
+- `--seed`: Random seed for reproducibility (default: 42)
+- `--skip_first_frames`: Skip N initial frames (default: 0)
+- `--load_cap`: Load maximum N frames from video. 0 = load all (default: 0)
+- `--prepend_frames`: Prepend N reversed frames to reduce start artifacts (auto-removed) (default: 0)
+- `--temporal_overlap`: Frames to overlap between batches/GPUs for smooth blending (default: 0)
+
+**Quality Control:**
+- `--color_correction`: Color correction method: 'lab' (perceptual, recommended), 'wavelet', 'wavelet_adaptive', 'hsv', 'adain', or 'none' (default: lab)
+- `--input_noise_scale`: Input noise injection scale (0.0-1.0). Reduces artifacts at high resolutions (default: 0.0)
+- `--latent_noise_scale`: Latent space noise scale (0.0-1.0). Softens details if needed (default: 0.0)
+
+**Memory Management:**
+- `--dit_offload_device`: Device to offload DiT model: 'none' (keep on GPU), 'cpu', or 'cuda:X' (default: none)
+- `--vae_offload_device`: Device to offload VAE model: 'none', 'cpu', or 'cuda:X' (default: none)
+- `--blocks_to_swap`: Number of transformer blocks to swap (0=disabled, 3B: 0-32, 7B: 0-36). Requires dit_offload_device (default: 0)
+- `--swap_io_components`: Offload I/O components for additional VRAM savings. Requires dit_offload_device
+- `--use_non_blocking`: Use non-blocking memory transfers for BlockSwap (recommended)
+
+**VAE Tiling:**
+- `--vae_encode_tiled`: Enable VAE encode tiling to reduce VRAM during encoding
+- `--vae_encode_tile_size`: VAE encode tile size in pixels (default: 1024)
+- `--vae_encode_tile_overlap`: VAE encode tile overlap in pixels (default: 128)
+- `--vae_decode_tiled`: Enable VAE decode tiling to reduce VRAM during decoding
+- `--vae_decode_tile_size`: VAE decode tile size in pixels (default: 1024)
+- `--vae_decode_tile_overlap`: VAE decode tile overlap in pixels (default: 128)
+- `--tile_debug`: Visualize tiles: 'false' (default), 'encode', or 'decode'
+
+**Performance Optimization:**
+- `--attention_mode`: Attention backend: 'sdpa' (default, stable) or 'flash_attn' (faster, requires package)
+- `--compile_dit`: Enable torch.compile for DiT model (20-40% speedup, requires PyTorch 2.0+ and Triton)
+- `--compile_vae`: Enable torch.compile for VAE model (15-25% speedup, requires PyTorch 2.0+ and Triton)
+- `--compile_backend`: Compilation backend: 'inductor' (full optimization) or 'cudagraphs' (lightweight) (default: inductor)
+- `--compile_mode`: Optimization level: 'default', 'reduce-overhead', 'max-autotune', 'max-autotune-no-cudagraphs' (default: default)
+- `--compile_fullgraph`: Compile entire model as single graph (faster but less flexible) (default: False)
+- `--compile_dynamic`: Handle varying input shapes without recompilation (default: False)
+- `--compile_dynamo_cache_size_limit`: Max cached compiled versions per function (default: 64)
+- `--compile_dynamo_recompile_limit`: Max recompilation attempts before fallback (default: 128)
+
+**Model Caching (batch processing):**
+- `--cache_dit`: Cache DiT model between files (single GPU only, speeds up directory processing)
+- `--cache_vae`: Cache VAE model between files (single GPU only, speeds up directory processing)
+
+**Multi-GPU:**
+- `--cuda_device`: CUDA device id(s). Single id (e.g., '0') or comma-separated list '0,1' for multi-GPU
+
+**Debugging:**
+- `--debug`: Enable verbose debug logging
+
+### Multi-GPU Processing Explained
+
+The CLI's multi-GPU mode automatically distributes the workload across multiple GPUs with intelligent temporal overlap handling:
+
+**How it works:**
+1. Video is split into chunks, one per GPU
+2. Each GPU processes its chunk independently
+3. Chunks overlap by `--temporal_overlap` frames
+4. Results are blended together seamlessly using the overlap region
+
+**Example for 2 GPUs with temporal_overlap=4:**
+```
+GPU 0: Frames 0-50 (includes 4 overlap frames at end)
+GPU 1: Frames 46-100 (includes 4 overlap frames at beginning)
+Result: Frames 0-100 with smooth transition at frame 48
+```
+
+**Best practices:**
+- Set `--temporal_overlap` to 2-8 frames for smooth blending
+- Higher overlap = smoother transitions but more redundant processing
+- Use `--prepend_frames` to reduce artifacts at video start
+- batch_size should divide evenly into chunk sizes for best results
 
 ## ⚠️ Limitations
 
-- Use a lot of VRAM, it will take all!!
-- Processing speed depends on GPU capabilities
+### Model Limitations
+
+**Batch Size Constraint**: The model requires batch_size to follow the **4n+1 formula** (1, 5, 9, 13, 17, 21, 25, ...) due to temporal consistency architecture. All frames in a batch are processed together for temporal coherence, then batches can be blended using temporal_overlap. Ideally, set batch_size to match your shot length for optimal quality.
+
+### Performance Considerations
+
+**VAE Bottleneck**: Even with optimized DiT upscaling (BlockSwap, GGUF, torch.compile), the VAE encoding/decoding stages can be the bottleneck, especially for high resolutions. The VAE is slow. Use large batch_size to mitigate this.
+
+**VRAM Usage**: While the integration now supports low VRAM systems (8GB or less with proper optimization), VRAM usage varies based on:
+- Input/output resolution (larger = more VRAM)
+- Batch size (higher = more VRAM but better temporal consistency and speed)
+- Model choice (FP16 > FP8 > GGUF in VRAM usage)
+- Optimization settings (BlockSwap, VAE tiling significantly reduce VRAM)
+
+**Speed**: Processing speed depends on:
+- GPU capabilities (compute performance, VRAM bandwidth, and architecture generation)
+- Model size (3B faster than 7B)
+- Batch size (larger batch sizes are faster per frame due to better GPU utilization)
+- Optimization settings (torch.compile provides significant speedup)
+- Resolution (higher resolutions are slower)
+
+### Best Practices
+
+1. **Start with debug enabled** to understand where VRAM is being used
+2. **For OOM errors during encoding**: Enable VAE encode tiling and reduce tile size
+3. **For OOM errors during upscaling**: Enable BlockSwap and increase blocks_to_swap
+4. **For OOM errors during decoding**: Enable VAE decode tiling and reduce tile size
+   - **If still getting OOM after trying all above**: Reduce batch_size or resolution
+5. **For best quality**: Use higher batch_size matching your shot length, FP16 models, and LAB color correction
+6. **For speed**: Use FP8/GGUF models, enable torch.compile, and use Flash Attention if available
+7. **Test settings with a short clip first** before processing long videos
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+Contributions are welcome! We value community input and improvements.
 
-Please make sure to update tests as appropriate.
+For detailed contribution guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### How to contribute:
+**Quick Start:**
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
 3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
 4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+5. Open a Pull Request to **main** branch for stable features or **nightly** branch for experimental features
 
-### Development Setup:
-
-1. Clone the repository
-2. Install dependencies
-3. Make your changes
-4. Test your changes
-5. Submit a pull request
-
-### Code Style:
-
-- Follow the existing code style
-- Add comments for complex logic
-- Update documentation if needed
-- Ensure all tests pass
-
-### Reporting Issues:
-
-When reporting issues, please include:
-
-- Your system specifications
-- ComfyUI version
-- Python version
-- Error messages
-- Steps to reproduce the issue
+**Get Help:**
+- YouTube: [AInVFX Channel](https://www.youtube.com/@AInVFX)
+- GitHub [Issues](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/issues): For bug reports and feature requests
+- GitHub [Discussions](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/discussions): For questions and community support
+- Discord: adrientoupet & NumZ#7184
 
 ## 🙏 Credits
 
-- Original [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) implementation
+This ComfyUI implementation is a collaborative project by **[NumZ](https://github.com/numz)** and **[AInVFX](https://www.youtube.com/@AInVFX)** (Adrien Toupet), based on the original [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) by ByteDance Seed Team.
 
-# 📜 License
+Special thanks to our community contributors including [benjaminherb](https://github.com/benjaminherb), [cmeka](https://github.com/cmeka), [FurkanGozukara](https://github.com/FurkanGozukara), [JohnAlcatraz](https://github.com/JohnAlcatraz), [lihaoyun6](https://github.com/lihaoyun6), [Luchuanzhao](https://github.com/Luchuanzhao), [Luke2642](https://github.com/Luke2642), [naxci1](https://github.com/naxci1), [q5sys](https://github.com/q5sys), and many others for their improvements, bug fixes, and testing.
 
-- The code in this repository is released under the MIT license as found in the [LICENSE file](LICENSE).
+## 📜 License
 
-```
-
-```
+The code in this repository is released under the Apache 2.0 license as found in the [LICENSE](LICENSE) file.

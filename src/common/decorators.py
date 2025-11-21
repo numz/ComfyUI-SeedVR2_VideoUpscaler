@@ -128,20 +128,3 @@ def new_thread(func: Callable) -> Callable:
         return thread
 
     return new_thread_wrapper
-
-
-def log_runtime(func: Callable) -> Callable:
-    """
-    Functions with this decorator will logging the runtime.
-    """
-
-    @functools.wraps(func)
-    def wrapped(*args, **kwargs):
-        torch.distributed.barrier()
-        start = time.perf_counter()
-        result = func(*args, **kwargs)
-        torch.distributed.barrier()
-        logger.info(f"Completed {func.__name__} in {time.perf_counter() - start:.3f} seconds.")
-        return result
-
-    return wrapped

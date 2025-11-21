@@ -14,7 +14,6 @@
 
 import math
 from contextlib import contextmanager
-import time
 from typing import List, Optional, Union
 import torch
 import torch.nn.functional as F
@@ -27,6 +26,8 @@ from .context_parallel_lib import cache_send_recv, get_cache_size
 from .global_config import get_norm_limit
 from .types import MemoryState, _inflation_mode_t, _memory_device_t
 from ....common.half_precision_fixes import safe_pad_operation
+from ....optimization.memory_manager import retry_on_oom
+from ....optimization.compatibility import NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND
 
 # Single GPU inference - no distributed processing needed
 #print("Warning: Using single GPU inference mode - distributed features disabled in causal_inflation_lib")
@@ -79,6 +80,37 @@ class InflatedCausalConv3d(Conv3d):
 
     def set_memory_device(self, memory_device: _memory_device_t):
         self.memory_device = memory_device
+    
+    def _conv_forward(self, input, weight, bias, *args, **kwargs):
+        """
+        Override _conv_forward to work around NVIDIA Conv3d memory bug.
+        
+        Bug: PyTorch 2.9-2.10 with cuDNN >= 91002 uses 3x memory for Conv3d 
+        with fp16/bfloat16 weights due to buggy dispatch layer.
+        
+        Workaround: Call torch.cudnn_convolution directly to bypass buggy layer.
+        Status is logged at startup in compatibility.py.
+        """
+        if (NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND and 
+            weight.dtype in (torch.float16, torch.bfloat16) and 
+            hasattr(torch.backends.cudnn, 'is_available') and
+            torch.backends.cudnn.is_available() and
+            getattr(torch.backends.cudnn, 'enabled', True)):
+            try:
+                # Direct cuDNN call bypasses buggy PyTorch dispatch layer (NVIDIA only)
+                out = torch.cudnn_convolution(
+                    input, weight, self.padding, self.stride, self.dilation, self.groups,
+                    benchmark=False, deterministic=False, allow_tf32=True
+                )
+                if bias is not None:
+                    out += bias.reshape((1, -1) + (1,) * (out.ndim - 2))
+                return out
+            except RuntimeError:
+                # Fallback if direct cuDNN call fails (dev builds, edge cases)
+                pass
+        
+        # Use standard path for unaffected configurations or if workaround failed
+        return super()._conv_forward(input, weight, bias, *args, **kwargs)
 
     def memory_limit_conv(
         self,
@@ -87,7 +119,6 @@ class InflatedCausalConv3d(Conv3d):
         split_dim=3,
         padding=(0, 0, 0, 0, 0, 0),
         prev_cache=None,
-        preserve_vram = False,
     ):
         # Compatible with no limit.
         if math.isinf(self.memory_limit):
@@ -102,11 +133,20 @@ class InflatedCausalConv3d(Conv3d):
         shape[-3:] += torch.tensor(padding).view(3, 2).sum(-1).flip(0)
         memory_occupy = shape.prod() * x.element_size() / 1024**3  # GiB
         if memory_occupy < self.memory_limit or split_dim == x.ndim:
+            x_concat = x
             if prev_cache is not None:
-                x = torch.cat([prev_cache, x], dim=split_dim - 1)
-            x = safe_pad_operation(x, padding, mode='constant', value=0.0)
-            with ignore_padding(self):
-                return super().forward(x)
+                x_concat = torch.cat([prev_cache, x], dim=split_dim - 1)
+            
+            def pad_and_forward():
+                padded = safe_pad_operation(x_concat, padding, mode='constant', value=0.0)
+                with ignore_padding(self):
+                    return Conv3d.forward(self, padded)
+            
+            return retry_on_oom(
+                pad_and_forward,
+                debug=getattr(self, 'debug', None),
+                operation_name="InflatedCausalConv3d.pad_and_forward"
+            )
 
         # Exceed memory limit, splitting tensor
 
@@ -119,8 +159,6 @@ class InflatedCausalConv3d(Conv3d):
         x = list(x.split(split_sizes, dim=split_dim))
         if prev_cache is not None:
             prev_cache = list(prev_cache.split(split_sizes, dim=split_dim))
-        if preserve_vram:
-            torch.cuda.empty_cache()
         # Loop Fwd.
         cache = None
         for idx in range(len(x)):
@@ -157,32 +195,25 @@ class InflatedCausalConv3d(Conv3d):
                 x[idx],
                 split_dim=split_dim + 1,
                 padding=padding,
-                prev_cache=cache,
-                preserve_vram=preserve_vram
+                prev_cache=cache
             )
 
             # Update cache.
             cache = next_cache
 
-        # ADD BY NUMZ
-        if preserve_vram:
-            torch.cuda.empty_cache()
-            #print("empty cache 1")
-            #time.sleep(2)
-        try:
-            output = torch.cat(x, split_dim)
-        except Exception as e:
-            print("OOM second chance")
-            torch.cuda.empty_cache()
-            time.sleep(2)
-            output = torch.cat(x, split_dim)
+        output = retry_on_oom(
+            torch.cat,
+            x,
+            split_dim,
+            debug=getattr(self, 'debug', None),
+            operation_name="InflatedCausalConv3d.concat_splits"
+        )
         return output
 
     def forward(
         self,
         input: Union[Tensor, List[Tensor]],
-        memory_state: MemoryState = MemoryState.UNSET,
-        preserve_vram: bool = False,
+        memory_state: MemoryState = MemoryState.UNSET
     ) -> Tensor:
         assert memory_state != MemoryState.UNSET
         if memory_state != MemoryState.ACTIVE:
@@ -193,7 +224,7 @@ class InflatedCausalConv3d(Conv3d):
             and get_sequence_parallel_group() is None
         ):
             return self.basic_forward(input, memory_state)
-        return self.slicing_forward(input, memory_state, preserve_vram)
+        return self.slicing_forward(input, memory_state)
 
     def basic_forward(self, input: Tensor, memory_state: MemoryState = MemoryState.UNSET):
         mem_size = self.stride[0] - self.kernel_size[0]
@@ -220,7 +251,6 @@ class InflatedCausalConv3d(Conv3d):
         self,
         input: Union[Tensor, List[Tensor]],
         memory_state: MemoryState = MemoryState.UNSET,
-        preserve_vram: bool = False,
     ) -> Tensor:
         squeeze_out = False
         if torch.is_tensor(input):
@@ -266,8 +296,7 @@ class InflatedCausalConv3d(Conv3d):
             input[i] = self.memory_limit_conv(
                 input[i],
                 padding=padding,
-                prev_cache=cache,
-                preserve_vram=preserve_vram
+                prev_cache=cache
             )
 
             # Update cache.
@@ -322,22 +351,21 @@ def init_causal_conv3d(
     return InflatedCausalConv3d(*args, inflation_mode=inflation_mode, **kwargs)
 
 
-def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor, preserve_vram: bool = False) -> torch.Tensor:
-    input_dtype = x.dtype
+def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
     if isinstance(norm_layer, (nn.LayerNorm, RMSNorm)):
         if x.ndim == 4:
             x = rearrange(x, "b c h w -> b h w c")
             x = norm_layer(x)
             x = rearrange(x, "b h w c -> b c h w")
-            return x.to(input_dtype)
+            return x
         if x.ndim == 5:
             x = rearrange(x, "b c t h w -> b t h w c")
             x = norm_layer(x)
             x = rearrange(x, "b t h w c -> b c t h w")
-            return x.to(input_dtype)
+            return x
     if isinstance(norm_layer, (nn.GroupNorm, nn.BatchNorm2d, nn.SyncBatchNorm)):
         if x.ndim <= 4:
-            return norm_layer(x).to(input_dtype)
+            return norm_layer(x)
         if x.ndim == 5:
             t = x.size(2)
             x = rearrange(x, "b c t h w -> (b t) c h w")
@@ -350,30 +378,34 @@ def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor, preserve_vram: b
                 x = list(x.chunk(num_chunks, dim=1))
                 weights = norm_layer.weight.chunk(num_chunks, dim=0)
                 biases = norm_layer.bias.chunk(num_chunks, dim=0)
+                
                 for i, (w, b) in enumerate(zip(weights, biases)):
-                    try:
-                        x[i] = F.group_norm(x[i], num_groups_per_chunk, w, b, norm_layer.eps)
-                    except Exception as e:
-                        print("OOM Second Chance : Group Norm")
-                        torch.cuda.empty_cache()
-                        time.sleep(2)
-                        x[i] = F.group_norm(x[i], num_groups_per_chunk, w, b, norm_layer.eps)
-                    x[i] = x[i].to(input_dtype)
-                # ADD BY NUMZ
-                if preserve_vram:
-                    torch.cuda.empty_cache()
-                # ADD BY NUMZ
-                try:
-                    x = torch.cat(x, dim=1)
-                except Exception as e:
-                    print("OOM Second Chance : Cat")
-                    torch.cuda.empty_cache()
-                    time.sleep(2)
-                    x = torch.cat(x, dim=1)
+                    def apply_group_norm():
+                        return F.group_norm(x[i], num_groups_per_chunk, w, b, norm_layer.eps)
+                    
+                    x[i] = retry_on_oom(
+                        apply_group_norm,
+                        debug=getattr(norm_layer, 'debug', None),
+                        operation_name=f"GroupNorm.chunk_{i}"
+                    )
+                    x[i] = x[i]
+                
+                x = retry_on_oom(
+                    torch.cat,
+                    x,
+                    dim=1,
+                    debug=getattr(norm_layer, 'debug', None),
+                    operation_name="GroupNorm.concat_chunks"
+                )
             else:
-                x = norm_layer(x)
+                x = retry_on_oom(
+                    norm_layer,
+                    x,
+                    debug=getattr(norm_layer, 'debug', None),
+                    operation_name="GroupNorm.direct"
+                )
             x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
-            return x.to(input_dtype)
+            return x
     raise NotImplementedError
 
 

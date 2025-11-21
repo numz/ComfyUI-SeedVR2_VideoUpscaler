@@ -12,37 +12,40 @@
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
 
+import torch
 from typing import Literal
 from torchvision.transforms import CenterCrop, Compose, InterpolationMode, Resize
 
 from .area_resize import AreaResize
 from .side_resize import SideResize
 
-
 def NaResize(
     resolution: int,
     mode: Literal["area", "side"],
     downsample_only: bool,
+    max_resolution: int = 0,
     interpolation: InterpolationMode = InterpolationMode.BICUBIC,
 ):
+    Interpolation = InterpolationMode.BILINEAR if (hasattr(torch, 'mps') and callable(getattr(torch.mps, 'is_available', None)) and torch.mps.is_available()) else interpolation
     if mode == "area":
         return AreaResize(
             max_area=resolution**2,
             downsample_only=downsample_only,
-            interpolation=interpolation,
+            interpolation=Interpolation,
         )
     if mode == "side":
         return SideResize(
             size=resolution,
+            max_size=max_resolution,
             downsample_only=downsample_only,
-            interpolation=interpolation,
+            interpolation=Interpolation,
         )
     if mode == "square":
         return Compose(
             [
                 Resize(
                     size=resolution,
-                    interpolation=interpolation,
+                    interpolation=Interpolation,
                 ),
                 CenterCrop(resolution),
             ]

@@ -1,7 +1,14 @@
-einops                   # Tensor operations
-omegaconf>=2.3.0                # Configuration system.
-diffusers>=0.34.0                # Diffusers
-pytorch-extension #pytorch extension
-rotary_embedding_torch
+torch
+torchvision
+safetensors
+numpy
+tqdm
+psutil
+einops
+omegaconf>=2.3.0
+diffusers>=0.33.1
+peft>=0.17.0
+rotary_embedding_torch>=0.5.3
 opencv-python
-peft>=0.15.0
+gguf
+matplotlib

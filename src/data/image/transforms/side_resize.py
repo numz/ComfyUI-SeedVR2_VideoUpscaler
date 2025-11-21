@@ -18,25 +18,31 @@ from PIL import Image
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as TVF
 
-
 class SideResize:
     def __init__(
         self,
         size: int,
+        max_size: int = 0,
         downsample_only: bool = False,
         interpolation: InterpolationMode = InterpolationMode.BICUBIC,
     ):
         self.size = size
+        self.max_size = max_size
         self.downsample_only = downsample_only
         self.interpolation = interpolation
+        if hasattr(torch, 'mps') and callable(getattr(torch.mps, 'is_available', None)) and torch.mps.is_available():
+            self.interpolation = InterpolationMode.BILINEAR
 
     def __call__(self, image: Union[torch.Tensor, Image.Image]):
         """
+        Resize image with shortest edge set to size, optionally limiting longest edge.
+        
         Args:
             image (PIL Image or Tensor): Image to be scaled.
 
         Returns:
-            PIL Image or Tensor: Rescaled image.
+            PIL Image or Tensor: Rescaled image with shortest edge = size,
+                                 and no edge exceeding max_size (if max_size > 0).
         """
         if isinstance(image, torch.Tensor):
             height, width = image.shape[-2:]
@@ -46,9 +52,23 @@ class SideResize:
             raise NotImplementedError
 
         if self.downsample_only and min(width, height) < self.size:
-            # keep original height and width for small pictures.
             size = min(width, height)
         else:
             size = self.size
 
-        return TVF.resize(image, size, self.interpolation)
+        # Resize to shortest edge
+        resized = TVF.resize(image, size, self.interpolation)
+        
+        # Apply max_size constraint if specified
+        if self.max_size > 0:
+            if isinstance(resized, torch.Tensor):
+                h, w = resized.shape[-2:]
+            else:
+                w, h = resized.size
+            
+            if max(h, w) > self.max_size:
+                scale = self.max_size / max(h, w)
+                new_h, new_w = round(h * scale), round(w * scale)
+                resized = TVF.resize(resized, (new_h, new_w), self.interpolation)
+        
+        return resized

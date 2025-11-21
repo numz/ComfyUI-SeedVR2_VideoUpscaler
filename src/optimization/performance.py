@@ -6,7 +6,7 @@ Extracted from: seedvr2.py (lines 1633-1730)
 """
 
 import torch
-from typing import List, Union
+from typing import List
 
 
 def optimized_video_rearrange(video_tensors: List[torch.Tensor]) -> List[torch.Tensor]:
@@ -25,6 +25,9 @@ def optimized_video_rearrange(video_tensors: List[torch.Tensor]) -> List[torch.T
         
     Returns:
         List of rearranged tensors in t c h w format
+        
+    Raises:
+        ValueError: If video tensor has invalid dimensions (not 3D or 4D)
     """
     if not video_tensors:
         return []
@@ -39,16 +42,18 @@ def optimized_video_rearrange(video_tensors: List[torch.Tensor]) -> List[torch.T
         if video.ndim == 3:
             videos_3d.append(video)
             indices_3d.append(i)
-        else:  # ndim == 4
+        elif video.ndim == 4:
             videos_4d.append(video)
             indices_4d.append(i)
+        else:
+            raise ValueError(f"Video tensor at index {i} has invalid dimensions: {video.ndim}. Expected 3D or 4D.")
     
     # 🎯 Prepare final result
     samples = [None] * len(video_tensors)
     
     # 🚀 BATCH PROCESSING for 3D videos (c h w -> 1 c h w)
     if videos_3d:
-        # Method 1: Stack + permute (faster than rearrange)
+        # Stack + permute (faster than rearrange)
         # c h w -> c 1 h w -> 1 c h w
         batch_3d = torch.stack([v.unsqueeze(1) for v in videos_3d])  # [batch, c, 1, h, w]
         batch_3d = batch_3d.permute(0, 2, 1, 3, 4)  # [batch, 1, c, h, w]

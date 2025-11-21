@@ -5,10 +5,7 @@ __object__:
 dit:
   model:
     __object__:
-      path:
-        - "custom_nodes.ComfyUI-SeedVR2_VideoUpscaler.src.models.dit_v2.nadit"
-        - "ComfyUI.custom_nodes.ComfyUI-SeedVR2_VideoUpscaler.src.models.dit_v2.nadit"
-        - "src.models.dit_v2.nadit"
+      path: "dit_3b.nadit"
       name: "NaDiT"
       args: "as_params"
     vid_in_channels: 33
@@ -48,10 +45,7 @@ ema:
 vae:
   model:
     __object__:
-      path:
-        - "custom_nodes.ComfyUI-SeedVR2_VideoUpscaler.src.models.video_vae_v3.modules.attn_video_vae"
-        - "ComfyUI.custom_nodes.ComfyUI-SeedVR2_VideoUpscaler.src.models.video_vae_v3.modules.attn_video_vae"
-        - "src.models.video_vae_v3.modules.attn_video_vae"
+      path: "video_vae_v3.modules.attn_video_vae"
       name: "VideoAutoencoderKLWrapper"
       args: "as_params"
     freeze_encoder: False
