@@ -48,7 +48,7 @@ import argparse
 import time
 import platform
 import multiprocessing as mp
-from typing import Dict, Any, List, Optional, Tuple, Literal
+from typing import Dict, Any, List, Optional, Tuple, Literal, Union
 from datetime import datetime
 from pathlib import Path
 
@@ -228,6 +228,103 @@ def read_video_chunk(cap: cv2.VideoCapture, max_frames: int) -> Optional[torch.T
     return torch.stack([torch.from_numpy(f) for f in frames]).to(torch.float32)
 
 
+def process_video_in_chunks_single_gpu(
+    input_path: Union[str, Path],
+    args: argparse.Namespace,
+    device_id: str,
+    output_path: Union[str, Path],
+    runner_cache: Optional[Dict[str, Any]] = None,
+) -> int:
+    """
+    Process a video in temporal chunks on a single GPU using chunked_mode settings.
+
+    This uses args.load_cap as the maximum frames per chunk, applies chunk_overlap
+    blending between sequential chunks, and writes results to a single MP4 file.
+
+    Returns the total number of frames written.
+    """
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video file: {input_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    debug.log(
+        f"Chunked processing enabled: {total_frames} frames, {width}x{height}, {fps:.2f} FPS",
+        category="info",
+    )
+
+    if args.skip_first_frames > 0:
+        skipped = 0
+        for _ in range(args.skip_first_frames):
+            ret, _ = cap.read()
+            if not ret:
+                break
+            skipped += 1
+        debug.log(f"Skipped first {skipped} frames before chunking", category="info")
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    if not out_video.isOpened():
+        cap.release()
+        raise ValueError(f"Cannot create video writer for: {output_path}")
+
+    max_chunk = args.load_cap
+    chunk_overlap = max(0, args.chunk_overlap)
+
+    chunk_index = 0
+    processed_frames = 0
+    prev_tail: Optional[np.ndarray] = None
+
+    while True:
+        frames_tensor = read_video_chunk(cap, max_chunk)
+        if frames_tensor is None:
+            break
+
+        chunk_index += 1
+        debug.log(f"Processing chunk {chunk_index}", category="generation")
+
+        upscaled = _single_gpu_direct_processing(frames_tensor, args, device_id, runner_cache)
+        upscaled_np = (upscaled.cpu().numpy() * 255.0).astype(np.uint8)
+
+        if prev_tail is None:
+            write_frames = upscaled_np
+        else:
+            overlap = min(chunk_overlap, prev_tail.shape[0], upscaled_np.shape[0])
+            if overlap > 0:
+                prev_tail_tensor = torch.from_numpy(prev_tail[-overlap:]).float() / 255.0
+                cur_head_tensor = torch.from_numpy(upscaled_np[:overlap]).float() / 255.0
+                blended = blend_overlapping_frames(prev_tail_tensor, cur_head_tensor, overlap)
+                blended_np = (blended.cpu().numpy() * 255.0).astype(np.uint8)
+                write_frames = np.concatenate([blended_np, upscaled_np[overlap:]], axis=0)
+            else:
+                write_frames = upscaled_np
+
+        for frame in write_frames:
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            out_video.write(frame_bgr)
+
+        processed_frames += write_frames.shape[0]
+
+        if chunk_overlap > 0:
+            prev_tail = upscaled_np[-chunk_overlap:].copy()
+        else:
+            prev_tail = upscaled_np[-1:].copy()
+
+    out_video.release()
+    cap.release()
+
+    debug.log(f"Chunked processing complete. Total frames written: {processed_frames}", category="success")
+
+    return processed_frames
+
+
 def get_media_files(directory: str) -> List[str]:
     """
     Get all video and image files from directory, sorted alphabetically.
@@ -394,42 +491,49 @@ def process_single_file(input_path: str, args: argparse.Namespace, device_list: 
     if input_type == "unknown":
         debug.log(f"Skipping unsupported file: {input_path}", level="WARNING", category="file", force=True)
         return 0
-    
+
     debug.log(f"Processing {input_type}: {Path(input_path).name}", category="generation", force=True)
+
+    if output_path is None:
+        output_path = generate_output_path(input_path, args.output_format, input_type=input_type)
+    elif not Path(output_path).suffix or (args.output_format == "png" and input_type != "image"):
+        output_path = generate_output_path(input_path, args.output_format,
+                                         output_dir=output_path, input_type=input_type)
+
+    format_prefix = "Auto-detected" if format_auto_detected else "Requested"
+    debug.log(f"{format_prefix} output format: {args.output_format}", category="info", force=True, indent_level=1)
+
+    if (
+        input_type == "video"
+        and args.chunked_mode
+        and args.load_cap > 0
+        and len(device_list) == 1
+        and (args.output_format in (None, "mp4", "auto"))
+    ):
+        debug.log("Using single-GPU chunked processing", category="setup")
+        frames_written = process_video_in_chunks_single_gpu(
+            input_path,
+            args,
+            device_list[0],
+            output_path,
+            runner_cache=runner_cache,
+        )
+
+        debug.log(f"Output saved to: {output_path}", category="file", force=True)
+        return frames_written
 
     # Extract frames
     if input_type == "video":
         start_time = time.time()
-        if args.chunked_mode and args.load_cap > 0:
-            debug.log(
-                "Chunked mode requested but not yet implemented; falling back to standard processing",
-                category="setup",
-            )
-            frames_tensor, original_fps = extract_frames_from_video(
-                input_path, args.skip_first_frames, args.load_cap
-            )
-        else:
-            frames_tensor, original_fps = extract_frames_from_video(
-                input_path, args.skip_first_frames, args.load_cap
-            )
+        frames_tensor, original_fps = extract_frames_from_video(
+            input_path, args.skip_first_frames, args.load_cap
+        )
         debug.log(f"Frame extraction time: {time.time() - start_time:.2f}s", category="timing")
     else:
         frames_tensor, original_fps = extract_frames_from_image(input_path)
     
     # Track frames before processing (for FPS calculation)
     input_frame_count = len(frames_tensor)
-    
-    # Generate or validate output path
-    if output_path is None:
-        output_path = generate_output_path(input_path, args.output_format, input_type=input_type)
-    elif not Path(output_path).suffix or (args.output_format == "png" and input_type != "image"):
-        # No extension or PNG sequence → treat as directory, generate filename
-        output_path = generate_output_path(input_path, args.output_format, 
-                                         output_dir=output_path, input_type=input_type)
-    
-    # Show format with auto-detection indicator
-    format_prefix = "Auto-detected" if format_auto_detected else "Requested"
-    debug.log(f"{format_prefix} output format: {args.output_format}", category="info", force=True, indent_level=1)
     
     # Process frames
     processing_start = time.time()
