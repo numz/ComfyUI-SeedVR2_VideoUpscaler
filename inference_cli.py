@@ -198,6 +198,36 @@ IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.webp'}
 # Video I/O Functions
 # =============================================================================
 
+
+def read_video_chunk(cap: cv2.VideoCapture, max_frames: int) -> Optional[torch.Tensor]:
+    """
+    Read up to max_frames frames from an open VideoCapture into a normalized tensor.
+
+    Args:
+        cap: An already opened cv2.VideoCapture instance.
+        max_frames: Maximum number of frames to read in this call.
+
+    Returns:
+        Tensor with shape [T, H, W, C] in float32 range [0, 1] if frames are read,
+        otherwise None when no frames remain.
+    """
+    frames: List[np.ndarray] = []
+
+    for _ in range(max_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = frame.astype(np.float32) / 255.0
+        frames.append(frame)
+
+    if not frames:
+        return None
+
+    return torch.stack([torch.from_numpy(f) for f in frames]).to(torch.float32)
+
+
 def get_media_files(directory: str) -> List[str]:
     """
     Get all video and image files from directory, sorted alphabetically.
@@ -342,7 +372,7 @@ def generate_output_path(input_path: str, output_format: str, output_dir: Option
     return str(output_path.resolve())
 
 
-def process_single_file(input_path: str, args: argparse.Namespace, device_list: List[str], 
+def process_single_file(input_path: str, args: argparse.Namespace, device_list: List[str],
                        output_path: Optional[str] = None, format_auto_detected: bool = False,
                        runner_cache: Optional[Dict[str, Any]] = None) -> int:
     """
@@ -366,13 +396,22 @@ def process_single_file(input_path: str, args: argparse.Namespace, device_list: 
         return 0
     
     debug.log(f"Processing {input_type}: {Path(input_path).name}", category="generation", force=True)
-    
+
     # Extract frames
     if input_type == "video":
         start_time = time.time()
-        frames_tensor, original_fps = extract_frames_from_video(
-            input_path, args.skip_first_frames, args.load_cap
-        )
+        if args.chunked_mode and args.load_cap > 0:
+            debug.log(
+                "Chunked mode requested but not yet implemented; falling back to standard processing",
+                category="setup",
+            )
+            frames_tensor, original_fps = extract_frames_from_video(
+                input_path, args.skip_first_frames, args.load_cap
+            )
+        else:
+            frames_tensor, original_fps = extract_frames_from_video(
+                input_path, args.skip_first_frames, args.load_cap
+            )
         debug.log(f"Frame extraction time: {time.time() - start_time:.2f}s", category="timing")
     else:
         frames_tensor, original_fps = extract_frames_from_image(input_path)
@@ -1094,6 +1133,10 @@ Examples:
                         help="Skip N initial frames (default: 0)")
     process_group.add_argument("--load_cap", type=int, default=0,
                         help="Load maximum N frames from video. 0 = load all (default: 0)")
+    process_group.add_argument("--chunked_mode", action="store_true",
+                        help="Enable experimental chunked video processing mode (no effect unless combined with future features).")
+    process_group.add_argument("--chunk_overlap", type=int, default=16,
+                        help="Number of frames for cross-chunk overlap in chunked mode (experimental, default: 16).")
     process_group.add_argument("--prepend_frames", type=int, default=0,
                         help="Prepend N reversed frames to reduce start artifacts (auto-removed). Default: 0")
     process_group.add_argument("--temporal_overlap", type=int, default=0,
