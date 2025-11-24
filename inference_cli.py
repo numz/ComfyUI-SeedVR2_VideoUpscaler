@@ -357,21 +357,6 @@ def process_video_in_chunks_single_gpu(
         upscaled_np = (upscaled.cpu().numpy() * 255.0).astype(np.uint8)
         T, H_out, W_out, C = upscaled_np.shape
 
-        if not is_png:
-            if out_video is None:
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (W_out, H_out))
-                if not out_video.isOpened():
-                    cap.release()
-                    raise ValueError(f"Cannot create video writer for: {output_path}")
-            else:
-                writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
-                writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                if (W_out, H_out) != (writer_width, writer_height):
-                    cap.release()
-                    raise RuntimeError(
-                        f"Unexpected size mismatch: upscaled {W_out}x{H_out}, writer {writer_width}x{writer_height}"
-                    )
         debug.log(
             f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}) before stitching.",
             category="generation",
@@ -398,6 +383,25 @@ def process_video_in_chunks_single_gpu(
                 write_frames = np.concatenate([blended_np, upscaled_np[overlap:]], axis=0)
             else:
                 write_frames = upscaled_np
+
+        if not is_png:
+            H_out, W_out = write_frames.shape[1:3]
+
+            if out_video is None:
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (W_out, H_out))
+                if not out_video.isOpened():
+                    cap.release()
+                    raise ValueError(f"Cannot create video writer for: {output_path}")
+            else:
+                writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
+                writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if writer_width != W_out or writer_height != H_out:
+                    cap.release()
+                    out_video.release()
+                    raise RuntimeError(
+                        f"Upscaled frame size {W_out}x{H_out} does not match VideoWriter size {writer_width}x{writer_height} for chunk {chunk_index}."
+                    )
 
         if is_png:
             written = save_frames_to_png_chunk(output_path, write_frames, processed_frames)
@@ -529,25 +533,10 @@ def process_video_in_chunks_multi_gpu(
         upscaled_np = (upscaled.cpu().numpy() * 255.0).astype(np.uint8)
         T, H_out, W_out, C = upscaled_np.shape
 
-        if not is_png and out_video is None:
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (W_out, H_out))
-            if not out_video.isOpened():
-                cap.release()
-                raise ValueError(f"Cannot create video writer for: {output_path}")
-
-        if not is_png and out_video is not None:
-            writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
-            writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            if (W_out, H_out) != (writer_width, writer_height):
-                cap.release()
-                raise RuntimeError(
-                    f"Unexpected size mismatch: upscaled {W_out}x{H_out}, writer {writer_width}x{writer_height}"
-                )
         debug.log(
             f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}) before stitching.",
             category="generation",
-        )
+            )
 
         if prev_tail is None:
             write_frames = upscaled_np
@@ -570,6 +559,25 @@ def process_video_in_chunks_multi_gpu(
                 write_frames = np.concatenate([blended_np, upscaled_np[overlap:]], axis=0)
             else:
                 write_frames = upscaled_np
+
+        if not is_png:
+            H_out, W_out = write_frames.shape[1:3]
+
+            if out_video is None:
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (W_out, H_out))
+                if not out_video.isOpened():
+                    cap.release()
+                    raise ValueError(f"Cannot create video writer for: {output_path}")
+            else:
+                writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
+                writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if writer_width != W_out or writer_height != H_out:
+                    cap.release()
+                    out_video.release()
+                    raise RuntimeError(
+                        f"Upscaled frame size {W_out}x{H_out} does not match VideoWriter size {writer_width}x{writer_height} for chunk {chunk_index}."
+                    )
 
         if is_png:
             written = save_frames_to_png_chunk(output_path, write_frames, processed_frames)
