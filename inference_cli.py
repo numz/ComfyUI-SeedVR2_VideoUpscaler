@@ -319,6 +319,8 @@ def process_video_in_chunks_single_gpu(
 
     is_png = args.output_format == "png"
     out_video = None
+    expected_width: Optional[int] = None
+    expected_height: Optional[int] = None
     if is_png:
         os.makedirs(output_path, exist_ok=True)
 
@@ -385,23 +387,28 @@ def process_video_in_chunks_single_gpu(
                 write_frames = upscaled_np
 
         if not is_png:
+            if write_frames.shape[0] == 0:
+                frames_consumed += chunk_len
+                continue
+
             H_out, W_out = write_frames.shape[1:3]
 
             if out_video is None:
+                expected_width, expected_height = W_out, H_out
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (W_out, H_out))
+                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (expected_width, expected_height))
                 if not out_video.isOpened():
                     cap.release()
                     raise ValueError(f"Cannot create video writer for: {output_path}")
             else:
-                writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
-                writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                if writer_width != W_out or writer_height != H_out:
-                    cap.release()
-                    out_video.release()
-                    raise RuntimeError(
-                        f"Upscaled frame size {W_out}x{H_out} does not match VideoWriter size {writer_width}x{writer_height} for chunk {chunk_index}."
-                    )
+                if expected_width is not None and expected_height is not None:
+                    if (W_out, H_out) != (expected_width, expected_height):
+                        if out_video is not None:
+                            out_video.release()
+                        cap.release()
+                        raise RuntimeError(
+                            f"Upscaled frame size {W_out}x{H_out} does not match expected VideoWriter size {expected_width}x{expected_height} for chunk {chunk_index}."
+                        )
 
         if is_png:
             written = save_frames_to_png_chunk(output_path, write_frames, processed_frames)
@@ -495,6 +502,8 @@ def process_video_in_chunks_multi_gpu(
 
     is_png = args.output_format == "png"
     out_video = None
+    expected_width: Optional[int] = None
+    expected_height: Optional[int] = None
     if is_png:
         os.makedirs(output_path, exist_ok=True)
 
@@ -561,23 +570,28 @@ def process_video_in_chunks_multi_gpu(
                 write_frames = upscaled_np
 
         if not is_png:
+            if write_frames.shape[0] == 0:
+                frames_consumed += chunk_len
+                continue
+
             H_out, W_out = write_frames.shape[1:3]
 
             if out_video is None:
+                expected_width, expected_height = W_out, H_out
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (W_out, H_out))
+                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (expected_width, expected_height))
                 if not out_video.isOpened():
                     cap.release()
                     raise ValueError(f"Cannot create video writer for: {output_path}")
             else:
-                writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
-                writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                if writer_width != W_out or writer_height != H_out:
-                    cap.release()
-                    out_video.release()
-                    raise RuntimeError(
-                        f"Upscaled frame size {W_out}x{H_out} does not match VideoWriter size {writer_width}x{writer_height} for chunk {chunk_index}."
-                    )
+                if expected_width is not None and expected_height is not None:
+                    if (W_out, H_out) != (expected_width, expected_height):
+                        if out_video is not None:
+                            out_video.release()
+                        cap.release()
+                        raise RuntimeError(
+                            f"Upscaled frame size {W_out}x{H_out} does not match expected VideoWriter size {expected_width}x{expected_height} for chunk {chunk_index}."
+                        )
 
         if is_png:
             written = save_frames_to_png_chunk(output_path, write_frames, processed_frames)
