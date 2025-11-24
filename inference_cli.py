@@ -319,13 +319,7 @@ def process_video_in_chunks_single_gpu(
 
     is_png = args.output_format == "png"
     out_video = None
-    if not is_png:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
-        if not out_video.isOpened():
-            cap.release()
-            raise ValueError(f"Cannot create video writer for: {output_path}")
-    else:
+    if is_png:
         os.makedirs(output_path, exist_ok=True)
 
     max_chunk = args.load_cap
@@ -361,6 +355,25 @@ def process_video_in_chunks_single_gpu(
 
         upscaled = _single_gpu_direct_processing(frames_tensor, args, device_id, runner_cache)
         upscaled_np = (upscaled.cpu().numpy() * 255.0).astype(np.uint8)
+        T, H_out, W_out, C = upscaled_np.shape
+
+        if not is_png and out_video is None:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (W_out, H_out))
+            if not out_video.isOpened():
+                cap.release()
+                raise ValueError(f"Cannot create video writer for: {output_path}")
+
+        if not is_png and out_video is not None:
+            writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
+            writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if (W_out, H_out) != (writer_width, writer_height):
+                debug.log(
+                    f"Upscaled frame size {W_out}x{H_out} does not match VideoWriter size; skipping write for this chunk.",
+                    category="error",
+                )
+                frames_consumed += chunk_len
+                continue
         debug.log(
             f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}) before stitching.",
             category="generation",
@@ -480,13 +493,7 @@ def process_video_in_chunks_multi_gpu(
 
     is_png = args.output_format == "png"
     out_video = None
-    if not is_png:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
-        if not out_video.isOpened():
-            cap.release()
-            raise ValueError(f"Cannot create video writer for: {output_path}")
-    else:
+    if is_png:
         os.makedirs(output_path, exist_ok=True)
 
     max_chunk = args.load_cap
@@ -522,6 +529,25 @@ def process_video_in_chunks_multi_gpu(
 
         upscaled = _gpu_processing(frames_tensor, device_list, args)
         upscaled_np = (upscaled.cpu().numpy() * 255.0).astype(np.uint8)
+        T, H_out, W_out, C = upscaled_np.shape
+
+        if not is_png and out_video is None:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (W_out, H_out))
+            if not out_video.isOpened():
+                cap.release()
+                raise ValueError(f"Cannot create video writer for: {output_path}")
+
+        if not is_png and out_video is not None:
+            writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
+            writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if (W_out, H_out) != (writer_width, writer_height):
+                debug.log(
+                    f"Upscaled frame size {W_out}x{H_out} does not match VideoWriter size; skipping write for this chunk.",
+                    category="error",
+                )
+                frames_consumed += chunk_len
+                continue
         debug.log(
             f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}) before stitching.",
             category="generation",
