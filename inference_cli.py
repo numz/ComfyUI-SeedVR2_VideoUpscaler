@@ -368,12 +368,10 @@ def process_video_in_chunks_single_gpu(
                 writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
                 writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 if (W_out, H_out) != (writer_width, writer_height):
-                    debug.log(
-                        f"Upscaled frame size {W_out}x{H_out} does not match VideoWriter size; skipping write for this chunk.",
-                        category="error",
+                    cap.release()
+                    raise RuntimeError(
+                        f"Unexpected size mismatch: upscaled {W_out}x{H_out}, writer {writer_width}x{writer_height}"
                     )
-                    frames_consumed += chunk_len
-                    continue
         debug.log(
             f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}) before stitching.",
             category="generation",
@@ -542,12 +540,10 @@ def process_video_in_chunks_multi_gpu(
             writer_width = int(out_video.get(cv2.CAP_PROP_FRAME_WIDTH))
             writer_height = int(out_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
             if (W_out, H_out) != (writer_width, writer_height):
-                debug.log(
-                    f"Upscaled frame size {W_out}x{H_out} does not match VideoWriter size; skipping write for this chunk.",
-                    category="error",
+                cap.release()
+                raise RuntimeError(
+                    f"Unexpected size mismatch: upscaled {W_out}x{H_out}, writer {writer_width}x{writer_height}"
                 )
-                frames_consumed += chunk_len
-                continue
         debug.log(
             f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}) before stitching.",
             category="generation",
