@@ -275,9 +275,9 @@ def process_video_in_chunks_single_gpu(
     """
     Process a video in temporal chunks on a single GPU using chunked_mode settings.
 
-    This uses args.load_cap as the maximum frames per chunk, applies chunk_overlap
-    blending between sequential chunks, and writes results to a single MP4 file or
-    PNG directory depending on args.output_format.
+    This uses args.load_cap as the maximum frames per chunk, preserves chunk_overlap
+    frames only as context, and writes each chunk's output sequentially to a single
+    MP4 file or PNG directory depending on args.output_format.
 
     Returns the total number of frames written.
     """
@@ -329,7 +329,6 @@ def process_video_in_chunks_single_gpu(
 
     chunk_index = 0
     processed_frames = 0
-    prev_tail: Optional[np.ndarray] = None
     frames_consumed = skipped
 
     while True:
@@ -357,34 +356,18 @@ def process_video_in_chunks_single_gpu(
 
         upscaled = _single_gpu_direct_processing(frames_tensor, args, device_id, runner_cache)
         upscaled_np = (upscaled.cpu().numpy() * 255.0).astype(np.uint8)
-        T, H_out, W_out, C = upscaled_np.shape
-
         debug.log(
-            f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}) before stitching.",
+            f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}).",
             category="generation",
         )
 
-        if prev_tail is None:
-            write_frames = upscaled_np
-        else:
-            overlap = min(chunk_overlap, prev_tail.shape[0], upscaled_np.shape[0])
-            if chunk_overlap > 0 and overlap < chunk_overlap:
-                debug.log(
-                    f"Requested chunk_overlap={chunk_overlap} exceeds chunk length; clamped to overlap={overlap} for this chunk.",
-                    category="generation",
-                )
-            if overlap > 0:
-                debug.log(
-                    f"Blending overlap={overlap} frames between chunk {chunk_index - 1} and chunk {chunk_index}",
-                    category="generation",
-                )
-                prev_tail_tensor = torch.from_numpy(prev_tail[-overlap:]).float() / 255.0
-                cur_head_tensor = torch.from_numpy(upscaled_np[:overlap]).float() / 255.0
-                blended = blend_overlapping_frames(prev_tail_tensor, cur_head_tensor, overlap)
-                blended_np = (blended.cpu().numpy() * 255.0).astype(np.uint8)
-                write_frames = np.concatenate([blended_np, upscaled_np[overlap:]], axis=0)
-            else:
-                write_frames = upscaled_np
+        write_frames = upscaled_np
+
+        if chunk_overlap > 0:
+            debug.log(
+                f"Chunk {chunk_index} will preserve last {chunk_overlap} frames as overlap context only (no blended frames written).",
+                category="generation",
+            )
 
         if not is_png:
             if write_frames.shape[0] == 0:
@@ -432,12 +415,6 @@ def process_video_in_chunks_single_gpu(
                 category="file",
             )
 
-        if chunk_overlap > 0 and upscaled_np.shape[0] > 0:
-            tail_len = min(chunk_overlap, upscaled_np.shape[0])
-            prev_tail = upscaled_np[-tail_len:].copy()
-        elif upscaled_np.shape[0] > 0:
-            prev_tail = upscaled_np[-1:].copy()
-
         frames_consumed += chunk_len
 
     if out_video is not None:
@@ -458,9 +435,9 @@ def process_video_in_chunks_multi_gpu(
     """
     Process a video in temporal chunks on multiple GPUs using chunked_mode settings.
 
-    This uses args.load_cap as the maximum frames per chunk, applies chunk_overlap
-    blending between sequential chunks, and writes results to a single MP4 file or
-    PNG directory depending on args.output_format.
+    This uses args.load_cap as the maximum frames per chunk, preserves chunk_overlap
+    frames only as context, and writes each chunk's output sequentially to a single
+    MP4 file or PNG directory depending on args.output_format.
 
     Returns the total number of frames written.
     """
@@ -512,7 +489,6 @@ def process_video_in_chunks_multi_gpu(
 
     chunk_index = 0
     processed_frames = 0
-    prev_tail: Optional[np.ndarray] = None
     frames_consumed = skipped
 
     while True:
@@ -540,34 +516,18 @@ def process_video_in_chunks_multi_gpu(
 
         upscaled = _gpu_processing(frames_tensor, device_list, args)
         upscaled_np = (upscaled.cpu().numpy() * 255.0).astype(np.uint8)
-        T, H_out, W_out, C = upscaled_np.shape
-
         debug.log(
-            f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}) before stitching.",
+            f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}).",
             category="generation",
             )
 
-        if prev_tail is None:
-            write_frames = upscaled_np
-        else:
-            overlap = min(chunk_overlap, prev_tail.shape[0], upscaled_np.shape[0])
-            if chunk_overlap > 0 and overlap < chunk_overlap:
-                debug.log(
-                    f"Requested chunk_overlap={chunk_overlap} exceeds chunk length; clamped to overlap={overlap} for this chunk.",
-                    category="generation",
-                )
-            if overlap > 0:
-                debug.log(
-                    f"Blending overlap={overlap} frames between chunk {chunk_index - 1} and chunk {chunk_index}",
-                    category="generation",
-                )
-                prev_tail_tensor = torch.from_numpy(prev_tail[-overlap:]).float() / 255.0
-                cur_head_tensor = torch.from_numpy(upscaled_np[:overlap]).float() / 255.0
-                blended = blend_overlapping_frames(prev_tail_tensor, cur_head_tensor, overlap)
-                blended_np = (blended.cpu().numpy() * 255.0).astype(np.uint8)
-                write_frames = np.concatenate([blended_np, upscaled_np[overlap:]], axis=0)
-            else:
-                write_frames = upscaled_np
+        write_frames = upscaled_np
+
+        if chunk_overlap > 0:
+            debug.log(
+                f"Chunk {chunk_index} will preserve last {chunk_overlap} frames as overlap context only (no blended frames written).",
+                category="generation",
+            )
 
         if not is_png:
             if write_frames.shape[0] == 0:
@@ -614,12 +574,6 @@ def process_video_in_chunks_multi_gpu(
                 f"Wrote {write_frames.shape[0]} frames to MP4 for chunk {chunk_index} (frames {start_idx}..{end_idx})",
                 category="file",
             )
-
-        if chunk_overlap > 0 and upscaled_np.shape[0] > 0:
-            tail_len = min(chunk_overlap, upscaled_np.shape[0])
-            prev_tail = upscaled_np[-tail_len:].copy()
-        elif upscaled_np.shape[0] > 0:
-            prev_tail = upscaled_np[-1:].copy()
 
         frames_consumed += chunk_len
 
@@ -1609,8 +1563,15 @@ Examples:
                         help="Load maximum N frames from video. 0 = load all (default: 0)")
     process_group.add_argument("--chunked_mode", action="store_true",
                         help="Enable experimental chunked video processing mode (no effect unless combined with future features).")
-    process_group.add_argument("--chunk_overlap", type=int, default=16,
-                        help="Number of frames for cross-chunk overlap in chunked mode (experimental, default: 16).")
+    process_group.add_argument(
+        "--chunk_overlap",
+        type=int,
+        default=16,
+        help=(
+            "Number of overlap frames reserved for chunk context in chunked mode (experimental, default: 16). "
+            "Chunks are written sequentially without cross-chunk blending."
+        ),
+    )
     process_group.add_argument("--prepend_frames", type=int, default=0,
                         help="Prepend N reversed frames to reduce start artifacts (auto-removed). Default: 0")
     process_group.add_argument("--temporal_overlap", type=int, default=0,
