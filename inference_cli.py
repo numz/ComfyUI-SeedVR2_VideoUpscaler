@@ -275,9 +275,10 @@ def process_video_in_chunks_single_gpu(
     """
     Process a video in temporal chunks on a single GPU using chunked_mode settings.
 
-    This uses args.load_cap as the maximum frames per chunk, preserves chunk_overlap
-    frames only as context, and writes each chunk's output sequentially to a single
-    MP4 file or PNG directory depending on args.output_format.
+    This uses args.load_cap as the maximum new frames per chunk while reusing
+    chunk_overlap tail frames from the previous chunk as context. Overlapped
+    frames are re-processed for temporal context but only written once in the
+    stitched output.
 
     Returns the total number of frames written.
     """
@@ -330,10 +331,11 @@ def process_video_in_chunks_single_gpu(
     chunk_index = 0
     processed_frames = 0
     frames_consumed = skipped
+    prev_raw_tail: Optional[torch.Tensor] = None
 
     while True:
-        frames_tensor = read_video_chunk(cap, max_chunk)
-        if frames_tensor is None:
+        new_frames_tensor = read_video_chunk(cap, max_chunk)
+        if new_frames_tensor is None:
             debug.log(
                 f"No frames returned for chunk {chunk_index + 1}; stopping.",
                 category="generation",
@@ -341,11 +343,22 @@ def process_video_in_chunks_single_gpu(
             break
 
         chunk_index += 1
-        chunk_len = frames_tensor.shape[0]
-        global_start = frames_consumed
+        chunk_len = new_frames_tensor.shape[0]
+
+        overlap_context = 0
+        if chunk_overlap > 0 and prev_raw_tail is not None and prev_raw_tail.shape[0] > 0:
+            overlap_context = min(chunk_overlap, prev_raw_tail.shape[0])
+
+        if overlap_context > 0:
+            frames_tensor = torch.cat([prev_raw_tail[-overlap_context:], new_frames_tensor], dim=0)
+        else:
+            frames_tensor = new_frames_tensor
+
+        global_start = frames_consumed - overlap_context
         global_end = frames_consumed + chunk_len - 1
+        overlap_msg = f" (chunk_overlap={overlap_context})" if overlap_context > 0 else ""
         debug.log(
-            f"Processing chunk {chunk_index}: raw input frames [{global_start}..{global_end}]",
+            f"Processing chunk {chunk_index}: raw input frames [{global_start}..{global_end}]{overlap_msg}",
             category="generation",
         )
         if chunk_len < max_chunk:
@@ -357,17 +370,17 @@ def process_video_in_chunks_single_gpu(
         upscaled = _single_gpu_direct_processing(frames_tensor, args, device_id, runner_cache)
         upscaled_np = (upscaled.cpu().numpy() * 255.0).astype(np.uint8)
         debug.log(
-            f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}).",
+            f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len} + context={overlap_context}).",
             category="generation",
         )
 
-        write_frames = upscaled_np
-
-        if chunk_overlap > 0:
+        drop_count = overlap_context if chunk_index > 1 else 0
+        if drop_count > 0:
             debug.log(
-                f"Chunk {chunk_index} will preserve last {chunk_overlap} frames as overlap context only (no blended frames written).",
+                f"Dropping {drop_count} overlapped context frame(s) from chunk {chunk_index} output (already covered by previous chunk).",
                 category="generation",
             )
+        write_frames = upscaled_np[drop_count:]
 
         if not is_png:
             if write_frames.shape[0] == 0:
@@ -415,6 +428,11 @@ def process_video_in_chunks_single_gpu(
                 category="file",
             )
 
+        if chunk_overlap > 0:
+            prev_raw_tail = new_frames_tensor[-chunk_overlap:].clone()
+        else:
+            prev_raw_tail = None
+
         frames_consumed += chunk_len
 
     if out_video is not None:
@@ -435,9 +453,10 @@ def process_video_in_chunks_multi_gpu(
     """
     Process a video in temporal chunks on multiple GPUs using chunked_mode settings.
 
-    This uses args.load_cap as the maximum frames per chunk, preserves chunk_overlap
-    frames only as context, and writes each chunk's output sequentially to a single
-    MP4 file or PNG directory depending on args.output_format.
+    This uses args.load_cap as the maximum new frames per chunk while reusing
+    chunk_overlap tail frames from the previous chunk as context. Overlapped
+    frames are re-processed for temporal context but only written once in the
+    stitched output.
 
     Returns the total number of frames written.
     """
@@ -490,10 +509,11 @@ def process_video_in_chunks_multi_gpu(
     chunk_index = 0
     processed_frames = 0
     frames_consumed = skipped
+    prev_raw_tail: Optional[torch.Tensor] = None
 
     while True:
-        frames_tensor = read_video_chunk(cap, max_chunk)
-        if frames_tensor is None:
+        new_frames_tensor = read_video_chunk(cap, max_chunk)
+        if new_frames_tensor is None:
             debug.log(
                 f"No frames returned for chunk {chunk_index + 1}; stopping.",
                 category="generation",
@@ -501,11 +521,22 @@ def process_video_in_chunks_multi_gpu(
             break
 
         chunk_index += 1
-        chunk_len = frames_tensor.shape[0]
-        global_start = frames_consumed
+        chunk_len = new_frames_tensor.shape[0]
+
+        overlap_context = 0
+        if chunk_overlap > 0 and prev_raw_tail is not None and prev_raw_tail.shape[0] > 0:
+            overlap_context = min(chunk_overlap, prev_raw_tail.shape[0])
+
+        if overlap_context > 0:
+            frames_tensor = torch.cat([prev_raw_tail[-overlap_context:], new_frames_tensor], dim=0)
+        else:
+            frames_tensor = new_frames_tensor
+
+        global_start = frames_consumed - overlap_context
         global_end = frames_consumed + chunk_len - 1
+        overlap_msg = f" (chunk_overlap={overlap_context})" if overlap_context > 0 else ""
         debug.log(
-            f"Processing chunk {chunk_index}: raw input frames [{global_start}..{global_end}]",
+            f"Processing chunk {chunk_index}: raw input frames [{global_start}..{global_end}]{overlap_msg}",
             category="generation",
         )
         if chunk_len < max_chunk:
@@ -517,17 +548,17 @@ def process_video_in_chunks_multi_gpu(
         upscaled = _gpu_processing(frames_tensor, device_list, args)
         upscaled_np = (upscaled.cpu().numpy() * 255.0).astype(np.uint8)
         debug.log(
-            f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len}).",
+            f"Chunk {chunk_index} produced {upscaled_np.shape[0]} frames (T={chunk_len} + context={overlap_context}).",
             category="generation",
             )
 
-        write_frames = upscaled_np
-
-        if chunk_overlap > 0:
+        drop_count = overlap_context if chunk_index > 1 else 0
+        if drop_count > 0:
             debug.log(
-                f"Chunk {chunk_index} will preserve last {chunk_overlap} frames as overlap context only (no blended frames written).",
+                f"Dropping {drop_count} overlapped context frame(s) from chunk {chunk_index} output (already covered by previous chunk).",
                 category="generation",
             )
+        write_frames = upscaled_np[drop_count:]
 
         if not is_png:
             if write_frames.shape[0] == 0:
@@ -574,6 +605,11 @@ def process_video_in_chunks_multi_gpu(
                 f"Wrote {write_frames.shape[0]} frames to MP4 for chunk {chunk_index} (frames {start_idx}..{end_idx})",
                 category="file",
             )
+
+        if chunk_overlap > 0:
+            prev_raw_tail = new_frames_tensor[-chunk_overlap:].clone()
+        else:
+            prev_raw_tail = None
 
         frames_consumed += chunk_len
 
@@ -1568,8 +1604,8 @@ Examples:
         type=int,
         default=16,
         help=(
-            "Number of overlap frames reserved for chunk context in chunked mode (experimental, default: 16). "
-            "Chunks are written sequentially without cross-chunk blending."
+            "Number of frames at the end of each chunk to reuse as temporal context for the next chunk "
+            "(chunked mode only, default: 16). These frames are re-processed for context but only kept once in the final output."
         ),
     )
     process_group.add_argument("--prepend_frames", type=int, default=0,
