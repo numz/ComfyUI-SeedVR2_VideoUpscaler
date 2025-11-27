@@ -14,9 +14,9 @@ api = FastAPI()
 
 @api.post("/upscale")
 async def send(
-    args: str,
     file: Annotated[UploadFile, File()],
     background_tasks: BackgroundTasks,
+    args: str = "--batch_size 5 --dit_offload_device cpu --vae_offload_device cpu --tensor_offload_device cpu --vae_encode_tiled --swap_io_components --compile_dit --compile_vae --blocks_to_swap 16 --debug",
 ):
     temp_dir = Path(tempfile.gettempdir())
     file_suffix = Path(file.filename).suffix
@@ -31,10 +31,10 @@ async def send(
 
 def upscale_task(filename: str, args: str) -> None:
     if "--cache_dit" not in args:
-        args += "--cache_dit"
+        args += " --cache_dit"
 
     if "--cache_vae" not in args:
-        args += "--cache_vae"
+        args += " --cache_vae"
 
     extra_args = shlex.split(args) if args else []
     inference([filename, *extra_args])
