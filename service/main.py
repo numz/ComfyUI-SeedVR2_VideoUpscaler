@@ -4,14 +4,28 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, File, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 
-api = FastAPI()
+
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """
+    Application lifespan context.
+
+    Ensures that any running child processes are cleaned up on shutdown.
+    """
+    try:
+        yield
+    finally:
+        _terminate_all_children()
+
+
+api = FastAPI(lifespan=lifespan)
 
 
 @api.post("/upscale")
@@ -24,6 +38,14 @@ async def send(
     Accept an uploaded file and arguments for the CLI, persist the file
     to a temporary location, and enqueue an asynchronous upscale task.
     """
+    # Block if another upscale task is already running.
+    with _active_lock:
+        if _active_processes:
+            raise HTTPException(
+                status_code=409,
+                detail="Another upscale task is already running",
+            )
+
     # Persist the uploaded file to disk in the system temp directory so it is
     # available to the background task. We generate a unique name to avoid
     # collisions.
@@ -74,12 +96,6 @@ def _terminate_all_children() -> None:
                 proc.kill()
             except Exception:
                 pass
-
-
-@api.on_event("shutdown")
-async def _on_shutdown() -> None:
-    """FastAPI shutdown hook to clean up any running upscale subprocesses."""
-    _terminate_all_children()
 
 
 atexit.register(_terminate_all_children)
