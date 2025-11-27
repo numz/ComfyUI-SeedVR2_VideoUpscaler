@@ -1772,14 +1772,13 @@ def main(cli_args=None) -> None:
                         force=True,
                     )
 
-            # No caching for single file (no benefit)
             frames = process_single_file(
                 args.input,
                 args,
                 device_list,
                 args.output,
                 format_auto_detected=format_auto_detected,
-                runner_cache=None,
+                runner_cache=runner_cache,
             )
             total_frames_processed += frames
 

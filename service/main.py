@@ -30,6 +30,12 @@ async def send(
 
 
 def upscale_task(filename: str, args: str) -> None:
+    if "--cache_dit" not in args:
+        args += "--cache_dit"
+
+    if "--cache_vae" not in args:
+        args += "--cache_vae"
+
     extra_args = shlex.split(args) if args else []
     inference([filename, *extra_args])
 
