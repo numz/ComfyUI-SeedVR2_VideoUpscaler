@@ -3,6 +3,20 @@ SeedVR2 Video Upscaler Node
 Main ComfyUI node for high-quality video upscaling using diffusion models
 """
 
+# =============================================================================
+# DEPRECATION NOTICE - This branch is no longer supported
+# =============================================================================
+raise RuntimeError(
+    "\n\n"
+    "======================================================================\n"
+    "❌ ERROR: This nightly branch of SeedVR2 is DEPRECATED and no longer supported.\n"
+    "======================================================================\n\n"
+    "Please update to the main branch:\n"
+    "  • Remove the old SeedVR2 folder and reinstall via ComfyUI Manager (recommended)\n"
+    "  • Or visit: https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler\n\n"
+    "======================================================================\n\n"
+)
+
 import torch
 from comfy_api.latest import io
 from typing import Tuple, Dict, Any, Optional
