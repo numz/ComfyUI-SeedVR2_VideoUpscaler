@@ -13,7 +13,7 @@ import psutil
 from typing import Tuple, Dict, Any, Optional, List, Union
     
 
-def get_device_list(include_none: bool = False, include_cpu: bool = False) -> List[str]:
+def get_device_list(include_none: bool = False, include_cpu: bool = True) -> List[str]:
     """
     Get list of available compute devices for SeedVR2
     
