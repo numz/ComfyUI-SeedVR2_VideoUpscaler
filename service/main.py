@@ -6,22 +6,31 @@ from uuid import uuid4
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, UploadFile
+from fastapi.staticfiles import StaticFiles
 
 from inference_cli import main as inference
 
+# Use the system temporary directory for storing uploads and results
+TEMP_DIR = Path(tempfile.gettempdir())
+
 api = FastAPI()
+
+# Expose the temporary directory via HTTP so generated results can be accessed
+api.mount("/tmp", StaticFiles(directory=TEMP_DIR), name="tmp")
+
+
+CMD = "--temporal_overlap 3 --dit_model seedvr2_ema_7b_fp16.safetensors --uniform_batch_size --vae_encode_tiled --vae_decode_tiled --batch_size 53 --dit_offload_device cpu --vae_offload_device cpu --tensor_offload_device cpu --swap_io_components --blocks_to_swap 36"
 
 
 @api.post("/upscale")
 async def send(
     file: Annotated[UploadFile, File()],
     background_tasks: BackgroundTasks,
-    args: str = "--batch_size 5 --dit_offload_device cpu --vae_offload_device cpu --tensor_offload_device cpu --vae_encode_tiled --swap_io_components --compile_dit --compile_vae --blocks_to_swap 16 --debug",
+    args: str = CMD,
 ):
-    temp_dir = Path(tempfile.gettempdir())
     file_suffix = Path(file.filename).suffix
     stored_name = f"seedvr_{uuid4().hex}{file_suffix}"
-    stored_path = temp_dir / stored_name
+    stored_path = TEMP_DIR / stored_name
     contents = await file.read()
     stored_path.write_bytes(contents)
 
