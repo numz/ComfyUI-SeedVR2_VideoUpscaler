@@ -466,54 +466,6 @@ def process_video_in_chunks_single_gpu(
 
     total_padding_removed = 0
 
-    carryover: Optional[np.ndarray] = None
-
-    def write_frames_block(frames: np.ndarray, chunk_idx: int) -> None:
-        nonlocal processed_frames, out_video, expected_width, expected_height
-
-        if frames.shape[0] == 0:
-            return
-
-        if not is_png:
-            H_out, W_out = frames.shape[1:3]
-
-            if out_video is None:
-                expected_width, expected_height = W_out, H_out
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (expected_width, expected_height))
-                if not out_video.isOpened():
-                    cap.release()
-                    raise ValueError(f"Cannot create video writer for: {output_path}")
-            else:
-                if expected_width is not None and expected_height is not None:
-                    if (W_out, H_out) != (expected_width, expected_height):
-                        if out_video is not None:
-                            out_video.release()
-                        cap.release()
-                        raise RuntimeError(
-                            f"Upscaled frame size {W_out}x{H_out} does not match expected VideoWriter size {expected_width}x{expected_height} for chunk {chunk_idx}."
-                        )
-
-        if is_png:
-            written = save_frames_to_png_chunk(output_path, frames, processed_frames)
-            if written > 0:
-                start_idx = processed_frames
-                end_idx = processed_frames + written - 1
-                cli_log_debug(
-                    f"Wrote PNG frames [{start_idx}..{end_idx}] for chunk {chunk_idx}"
-                )
-            processed_frames += written
-        else:
-            start_idx = processed_frames
-            for frame in frames:
-                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                out_video.write(frame_bgr)
-            processed_frames += frames.shape[0]
-            end_idx = processed_frames - 1 if frames.shape[0] > 0 else processed_frames
-            cli_log_debug(
-                f"Wrote {frames.shape[0]} frames to MP4 for chunk {chunk_idx} (frames {start_idx}..{end_idx})"
-            )
-
     while True:
         new_frames_tensor = read_video_chunk(cap, max_chunk)
         if new_frames_tensor is None:
@@ -563,28 +515,51 @@ def process_video_in_chunks_single_gpu(
             cli_log_debug(
                 f"Dropping {drop_count} overlapped context frame(s) from chunk {chunk_index} output (already covered by previous chunk)."
             )
+        write_frames = upscaled_np[drop_count:]
 
-        if carryover is not None:
-            blend_overlap = min(args.temporal_overlap, drop_count, carryover.shape[0], upscaled_np.shape[0])
-            if blend_overlap > 0:
-                prev_tail = torch.from_numpy(carryover[-blend_overlap:]).to(torch.float32) / 255.0
-                cur_head = torch.from_numpy(upscaled_np[:blend_overlap]).to(torch.float32) / 255.0
-                blended = blend_overlapping_frames(prev_tail, cur_head, blend_overlap)
-                blended_np = (blended.clamp(0.0, 1.0).cpu().numpy() * 255.0).astype(np.uint8)
-                carryover = np.concatenate([carryover[:-blend_overlap], blended_np], axis=0)
+        if not is_png:
+            if write_frames.shape[0] == 0:
+                frames_consumed += chunk_len
+                continue
 
-            write_frames_block(carryover, chunk_index)
-        
-        chunk_frames_no_context = upscaled_np[drop_count:]
+            H_out, W_out = write_frames.shape[1:3]
 
-        if args.temporal_overlap > 0:
-            tail_keep = min(args.temporal_overlap, chunk_frames_no_context.shape[0])
-            carryover = chunk_frames_no_context[-tail_keep:].copy() if tail_keep > 0 else None
-            chunk_frames_no_context = chunk_frames_no_context[:-tail_keep] if tail_keep > 0 else chunk_frames_no_context
+            if out_video is None:
+                expected_width, expected_height = W_out, H_out
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (expected_width, expected_height))
+                if not out_video.isOpened():
+                    cap.release()
+                    raise ValueError(f"Cannot create video writer for: {output_path}")
+            else:
+                if expected_width is not None and expected_height is not None:
+                    if (W_out, H_out) != (expected_width, expected_height):
+                        if out_video is not None:
+                            out_video.release()
+                        cap.release()
+                        raise RuntimeError(
+                            f"Upscaled frame size {W_out}x{H_out} does not match expected VideoWriter size {expected_width}x{expected_height} for chunk {chunk_index}."
+                        )
+
+        if is_png:
+            written = save_frames_to_png_chunk(output_path, write_frames, processed_frames)
+            if written > 0:
+                start_idx = processed_frames
+                end_idx = processed_frames + written - 1
+                cli_log_debug(
+                    f"Wrote PNG frames [{start_idx}..{end_idx}] for chunk {chunk_index}"
+                )
+            processed_frames += written
         else:
-            carryover = None
-
-        write_frames_block(chunk_frames_no_context, chunk_index)
+            start_idx = processed_frames
+            for frame in write_frames:
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                out_video.write(frame_bgr)
+            processed_frames += write_frames.shape[0]
+            end_idx = processed_frames - 1 if write_frames.shape[0] > 0 else processed_frames
+            cli_log_debug(
+                f"Wrote {write_frames.shape[0]} frames to MP4 for chunk {chunk_index} (frames {start_idx}..{end_idx})"
+            )
 
         if chunk_overlap > 0:
             prev_raw_tail = new_frames_tensor[-chunk_overlap:].clone()
@@ -602,9 +577,6 @@ def process_video_in_chunks_single_gpu(
             f"🧩 Chunk {completed}/{num_chunks} completed in {chunk_elapsed:.1f}s "
             f"(elapsed {total_elapsed:.1f}s, ETA {eta:.1f}s)"
         )
-
-    if carryover is not None and carryover.shape[0] > 0:
-        write_frames_block(carryover, num_chunks)
 
     if out_video is not None:
         out_video.release()
@@ -735,54 +707,6 @@ def process_video_in_chunks_multi_gpu(
     total_overlap_frames_removed = 0
     total_padding_removed = 0
 
-    carryover: Optional[np.ndarray] = None
-
-    def write_frames_block(frames: np.ndarray, chunk_idx: int) -> None:
-        nonlocal processed_frames, out_video, expected_width, expected_height
-
-        if frames.shape[0] == 0:
-            return
-
-        if not is_png:
-            H_out, W_out = frames.shape[1:3]
-
-            if out_video is None:
-                expected_width, expected_height = W_out, H_out
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (expected_width, expected_height))
-                if not out_video.isOpened():
-                    cap.release()
-                    raise ValueError(f"Cannot create video writer for: {output_path}")
-            else:
-                if expected_width is not None and expected_height is not None:
-                    if (W_out, H_out) != (expected_width, expected_height):
-                        if out_video is not None:
-                            out_video.release()
-                        cap.release()
-                        raise RuntimeError(
-                            f"Upscaled frame size {W_out}x{H_out} does not match expected VideoWriter size {expected_width}x{expected_height} for chunk {chunk_idx}."
-                        )
-
-        if is_png:
-            written = save_frames_to_png_chunk(output_path, frames, processed_frames)
-            if written > 0:
-                start_idx = processed_frames
-                end_idx = processed_frames + written - 1
-                cli_log_debug(
-                    f"Wrote PNG frames [{start_idx}..{end_idx}] for chunk {chunk_idx}"
-                )
-            processed_frames += written
-        else:
-            start_idx = processed_frames
-            for frame in frames:
-                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                out_video.write(frame_bgr)
-            processed_frames += frames.shape[0]
-            end_idx = processed_frames - 1 if frames.shape[0] > 0 else processed_frames
-            cli_log_debug(
-                f"Wrote {frames.shape[0]} frames to MP4 for chunk {chunk_idx} (frames {start_idx}..{end_idx})"
-            )
-
     while True:
         new_frames_tensor = read_video_chunk(cap, max_chunk)
         if new_frames_tensor is None:
@@ -832,28 +756,51 @@ def process_video_in_chunks_multi_gpu(
             cli_log_debug(
                 f"Dropping {drop_count} overlapped context frame(s) from chunk {chunk_index} output (already covered by previous chunk)."
             )
+        write_frames = upscaled_np[drop_count:]
 
-        if carryover is not None:
-            blend_overlap = min(args.temporal_overlap, drop_count, carryover.shape[0], upscaled_np.shape[0])
-            if blend_overlap > 0:
-                prev_tail = torch.from_numpy(carryover[-blend_overlap:]).to(torch.float32) / 255.0
-                cur_head = torch.from_numpy(upscaled_np[:blend_overlap]).to(torch.float32) / 255.0
-                blended = blend_overlapping_frames(prev_tail, cur_head, blend_overlap)
-                blended_np = (blended.clamp(0.0, 1.0).cpu().numpy() * 255.0).astype(np.uint8)
-                carryover = np.concatenate([carryover[:-blend_overlap], blended_np], axis=0)
+        if not is_png:
+            if write_frames.shape[0] == 0:
+                frames_consumed += chunk_len
+                continue
 
-            write_frames_block(carryover, chunk_index)
+            H_out, W_out = write_frames.shape[1:3]
 
-        chunk_frames_no_context = upscaled_np[drop_count:]
+            if out_video is None:
+                expected_width, expected_height = W_out, H_out
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                out_video = cv2.VideoWriter(str(output_path), fourcc, fps, (expected_width, expected_height))
+                if not out_video.isOpened():
+                    cap.release()
+                    raise ValueError(f"Cannot create video writer for: {output_path}")
+            else:
+                if expected_width is not None and expected_height is not None:
+                    if (W_out, H_out) != (expected_width, expected_height):
+                        if out_video is not None:
+                            out_video.release()
+                        cap.release()
+                        raise RuntimeError(
+                            f"Upscaled frame size {W_out}x{H_out} does not match expected VideoWriter size {expected_width}x{expected_height} for chunk {chunk_index}."
+                        )
 
-        if args.temporal_overlap > 0:
-            tail_keep = min(args.temporal_overlap, chunk_frames_no_context.shape[0])
-            carryover = chunk_frames_no_context[-tail_keep:].copy() if tail_keep > 0 else None
-            chunk_frames_no_context = chunk_frames_no_context[:-tail_keep] if tail_keep > 0 else chunk_frames_no_context
+        if is_png:
+            written = save_frames_to_png_chunk(output_path, write_frames, processed_frames)
+            if written > 0:
+                start_idx = processed_frames
+                end_idx = processed_frames + written - 1
+                cli_log_debug(
+                    f"Wrote PNG frames [{start_idx}..{end_idx}] for chunk {chunk_index}"
+                )
+            processed_frames += written
         else:
-            carryover = None
-
-        write_frames_block(chunk_frames_no_context, chunk_index)
+            start_idx = processed_frames
+            for frame in write_frames:
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                out_video.write(frame_bgr)
+            processed_frames += write_frames.shape[0]
+            end_idx = processed_frames - 1 if write_frames.shape[0] > 0 else processed_frames
+            cli_log_debug(
+                f"Wrote {write_frames.shape[0]} frames to MP4 for chunk {chunk_index} (frames {start_idx}..{end_idx})"
+            )
 
         if chunk_overlap > 0:
             prev_raw_tail = new_frames_tensor[-chunk_overlap:].clone()
@@ -871,9 +818,6 @@ def process_video_in_chunks_multi_gpu(
             f"🧩 Chunk {completed}/{num_chunks} completed in {chunk_elapsed:.1f}s "
             f"(elapsed {total_elapsed:.1f}s, ETA {eta:.1f}s)"
         )
-
-    if carryover is not None and carryover.shape[0] > 0:
-        write_frames_block(carryover, num_chunks)
 
     if out_video is not None:
         out_video.release()
