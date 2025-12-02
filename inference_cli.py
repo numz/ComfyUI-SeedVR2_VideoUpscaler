@@ -109,7 +109,7 @@ import numpy as np
 
 # Project imports
 from src.utils.downloads import download_weight
-from src.utils.model_registry import get_available_dit_models, DEFAULT_DIT, DEFAULT_VAE
+from src.utils.model_registry import get_available_dit_models, get_available_vae_models, DEFAULT_DIT, DEFAULT_VAE
 from src.utils.constants import SEEDVR2_FOLDER_NAME
 from src.core.generation_utils import (
     setup_generation_context, 
@@ -724,7 +724,7 @@ def _process_frames_core(
     
     runner, cache_context = prepare_runner(
         dit_model=args.dit_model,
-        vae_model=DEFAULT_VAE,
+        vae_model=args.vae_model,
         model_dir=model_dir,
         debug=debug,
         ctx=ctx,
@@ -1081,6 +1081,9 @@ Examples:
     model_group.add_argument("--dit_model", type=str, default=DEFAULT_DIT,
                         choices=get_available_dit_models(),
                         help="DiT model to use. Options: 3B (fp16/fp8/GGUF) or 7B (fp16/fp8/GGUF). Default: 3B FP8")
+    model_group.add_argument("--vae_model", type=str, default=DEFAULT_VAE,
+                        choices=get_available_vae_models(),
+                        help="VAE model to use. Use 'lightvaew2_1.pth' for faster encoding/decoding. Default: Official VAE")
     
     # Processing Parameters
     process_group = parser.add_argument_group('Processing parameters')
@@ -1303,7 +1306,7 @@ def main() -> None:
             debug.log(f"Using devices: {device_list}", category="device")
         
         # Download models once before processing
-        if not download_weight(dit_model=args.dit_model, vae_model=DEFAULT_VAE, model_dir=args.model_dir, debug=debug):
+        if not download_weight(dit_model=args.dit_model, vae_model=args.vae_model, model_dir=args.model_dir, debug=debug):
             debug.log("Failed to download required models. Check console output above.", level="ERROR", category="download", force=True)
             sys.exit(1)
         

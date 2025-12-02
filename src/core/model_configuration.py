@@ -69,6 +69,7 @@ from .infer import VideoDiffusionInfer
 from .model_cache import get_global_cache
 from ..common.config import load_config
 from ..models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
+from ..models.video_vae_v3.modules.light_vae import CausalConv3d
 from ..optimization.compatibility import (
     FP8CompatibleDiT,
     TRITON_AVAILABLE,
@@ -1103,6 +1104,10 @@ def _setup_vae_model(
     elif not hasattr(runner, 'vae') or runner.vae is None:
         # Create new VAE model
         # Configure VAE
+        from ..utils.model_registry import MODEL_REGISTRY, ModelInfo
+
+        vae_info = MODEL_REGISTRY.get(vae_model, ModelInfo())
+
         vae_config_path = os.path.join(script_directory, 
                                       'src/models/video_vae_v3/s8_c16_t4_inflation_sd3.yaml')
         vae_config = load_config(vae_config_path)
@@ -1111,6 +1116,16 @@ def _setup_vae_model(
         temporal_downsample_factor = vae_config.get('temporal_downsample_factor', 4)
         vae_config.spatial_downsample_factor = spatial_downsample_factor
         vae_config.temporal_downsample_factor = temporal_downsample_factor
+
+        # Apply pruning rate from registry if present (e.g. for LightVAE)
+        if vae_info.pruning_rate > 0:
+            vae_config.pruning_rate = vae_info.pruning_rate
+            debug.log(f"Applying VAE pruning rate: {vae_info.pruning_rate} (LightVAE mode)", category="vae")
+
+        # Set wrapper class if specified
+        if vae_info.wrapper_class:
+            vae_config.class_path = vae_info.wrapper_class
+            debug.log(f"Using VAE wrapper class: {vae_info.wrapper_class}", category="vae")
 
         runner.config.vae.model = OmegaConf.merge(runner.config.vae.model, vae_config)
         
@@ -1386,7 +1401,7 @@ def _disable_compile_for_dynamic_modules(module: torch.nn.Module) -> None:
     This prevents recompilation issues with variable tensor sizes.
     """
     for name, submodule in module.named_modules():
-        if isinstance(submodule, InflatedCausalConv3d):
+        if isinstance(submodule, (InflatedCausalConv3d, CausalConv3d)):
             # Mark module to skip compilation
             submodule._dynamo_disable = True
 
@@ -1461,7 +1476,7 @@ def _propagate_debug_to_modules(module: torch.nn.Module, debug: 'Debug') -> None
     if debug is None:
         return  # Early exit if no debug instance
         
-    target_modules = {'ResnetBlock3D', 'Upsample3D', 'InflatedCausalConv3d', 'GroupNorm'}
+    target_modules = {'ResnetBlock3D', 'Upsample3D', 'InflatedCausalConv3d', 'GroupNorm', 'CausalConv3d', 'ResidualBlock'}
     
     for name, submodule in module.named_modules():
         if submodule.__class__.__name__ in target_modules:
