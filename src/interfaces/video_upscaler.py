@@ -509,15 +509,21 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
             )
 
             sample = ctx['final_video']
-            
+            debug.log("", category="none", force=True)
+
             # Ensure CPU tensor in float32 for maximum ComfyUI compatibility
             if torch.is_tensor(sample):
                 if sample.is_cuda or sample.is_mps:
                     sample = sample.cpu()
                 if sample.dtype != torch.float32:
-                    sample = sample.to(torch.float32)
+                    src_dtype = sample.dtype
+                    try:
+                        sample = sample.to(torch.float32)
+                        debug.log(f"Converted output from {src_dtype} to float32", category="precision")
+                    except Exception as e:
+                        debug.log(f"Could not convert to float32: {e}. Output is {src_dtype}, compatibility with other nodes not guaranteed", 
+                                  level="WARNING", category="precision", force=True)
 
-            debug.log("", category="none", force=True)
             debug.log("Upscaling completed successfully!", category="success", force=True)
             debug.end_timer("generation", "Video generation")
 
@@ -529,7 +535,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
             debug.log_memory_state("After all phases complete", show_tensors=False, detailed_tensors=False)
             
             # Final peak vram summary
-            debug.log_peak_vram_summary()
+            debug.log_peak_memory_summary()
 
             # Final timing summary
             debug.log("", category="none")

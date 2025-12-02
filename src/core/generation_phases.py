@@ -809,7 +809,10 @@ def decode_all_batches(
     """
     Phase 3: VAE Decoding.
     
-    Decodes all upscaled latents back to pixel space.
+    Decodes all upscaled latents back to pixel space and writes directly to
+    pre-allocated final_video tensor. This avoids memory duplication by not
+    storing intermediate batch_samples.
+    
     Requires context from upscale_all_batches with upscaled latents.
     
     Args:
@@ -821,7 +824,8 @@ def decode_all_batches(
         
     Returns:
         dict: Updated context containing:
-            - batch_samples: List of decoded samples ready for post-processing
+            - final_video: Pre-allocated tensor with decoded samples (unnormalized, in [-1,1])
+            - decode_batch_info: List of (start_idx, end_idx, ori_length) for Phase 4 processing
             - VAE cleanup completed
             
     Raises:
@@ -844,11 +848,36 @@ def decode_all_batches(
 
     # Count valid latents
     num_valid_latents = len([l for l in ctx['all_upscaled_latents'] if l is not None])
-    
-    # Pre-allocate to match original batches (use ori_lengths which is always available)
     num_batches = len([l for l in ctx['all_ori_lengths'] if l is not None])
-    ctx['batch_samples'] = [None] * num_batches
     
+    # Get output dimensions from context (set during Phase 1)
+    if 'true_target_dims' not in ctx:
+        raise ValueError("true_target_dims not found in context. Run encode_all_batches first.")
+    true_h, true_w = ctx['true_target_dims']
+    total_frames = ctx.get('total_frames', 0)
+    C = 4 if ctx.get('is_rgba', False) else 3
+    
+    # Pre-allocate final_video at the START of decode phase (before any batch processing)
+    # This ensures we only need memory for final_video + 1 batch, not final_video + all batch_samples
+    target_device = ctx['tensor_offload_device'] if ctx['tensor_offload_device'] is not None else 'cpu'
+    channels_str = "RGBA" if C == 4 else "RGB"
+    required_gb = (total_frames * true_h * true_w * C * 2) / (1024**3)
+    debug.log(f"Pre-allocating output tensor: {total_frames} frames, {true_w}x{true_h}px, {channels_str} ({required_gb:.2f}GB)", 
+              category="setup", force=True)
+    
+    ctx['final_video'] = torch.empty((total_frames, true_h, true_w, C), dtype=ctx['compute_dtype'], device=target_device)
+    
+    # Track batch write positions for Phase 4 processing
+    # Each entry: (write_start, write_end, batch_idx, ori_length)
+    ctx['decode_batch_info'] = []
+    
+    # Get temporal overlap from context (set during Phase 1)
+    temporal_overlap = ctx.get('actual_temporal_overlap', 0)
+    
+    # Track padding removed for final summary
+    total_padding_removed = 0
+    
+    current_write_idx = 0
     decode_idx = 0
     
     try:
@@ -897,41 +926,96 @@ def decode_all_batches(
             samples = runner.vae_decode([upscaled_latent])
             debug.end_timer("vae_decode", "VAE decode")
             
-            # Process samples
+            # Process samples - get the single decoded sample
             debug.start_timer("optimized_video_rearrange")
             samples = optimized_video_rearrange(samples)
             debug.end_timer("optimized_video_rearrange", "Video rearrange")
             
-            # Convert from VAE dtype to compute dtype and offload to avoid VRAM accumulation
-            if ctx['tensor_offload_device'] is not None:
-                # samples is always a single-element list from vae_decode([upscaled_latent])]
-                if samples[0].is_cuda or samples[0].is_mps:
-                    samples[0] = manage_tensor(
-                        tensor=samples[0],
-                        target_device=ctx['tensor_offload_device'],
-                        tensor_name=f"sample_{decode_idx+1}",
-                        dtype=ctx['compute_dtype'],
-                        debug=debug,
-                        reason="storing decoded samples for post-processing",
-                        indent_level=1
-                    )
-            else:
-                # No offload device, but still convert to compute dtype
-                samples[0] = manage_tensor(
-                    tensor=samples[0],
-                    target_device=samples[0].device,
-                    tensor_name=f"sample_{decode_idx+1}",
-                    dtype=ctx['compute_dtype'],
-                    debug=debug,
-                    reason="VAE dtype → compute dtype",
-                    indent_level=1
-                )
-            ctx['batch_samples'][decode_idx] = samples
+            # Get the decoded sample (always single-element list)
+            sample = samples[0]
+            del samples
             
-            # Free the upscaled latent and GPU samples
+            # Get original length for this batch (before any padding was added)
+            ori_length = ctx['all_ori_lengths'][decode_idx] if decode_idx < len(ctx['all_ori_lengths']) else sample.shape[0]
+            
+            # Trim temporal padding: sample is in [T, C, H, W] format after rearrange
+            if ori_length < sample.shape[0]:
+                padding_removed = sample.shape[0] - ori_length
+                debug.log(f"Trimming temporal padding: {padding_removed} frames removed ({sample.shape[0]} → {ori_length})", 
+                         category="video", indent_level=1)
+                sample = sample[:ori_length]
+                total_padding_removed += padding_removed
+            
+            # Trim spatial padding to true target dimensions
+            current_h, current_w = sample.shape[-2:]
+            if current_h != true_h or current_w != true_w:
+                debug.log(f"Trimming spatial padding: {current_w}x{current_h} → {true_w}x{true_h}", 
+                         category="video", indent_level=1)
+                sample = sample[:, :, :true_h, :true_w]
+            
+            # Convert to output format: [T, C, H, W] → [T, H, W, C]
+            # Note: We keep values in [-1, 1] range - normalization happens in Phase 4
+            sample = optimized_sample_to_image_format(sample)  # T, C, H, W → T, H, W, C
+            
+            # Calculate write position with temporal overlap handling
+            batch_frames = sample.shape[0]
+            if decode_idx == 0 or temporal_overlap == 0:
+                # First batch or no overlap: write all frames
+                write_start = current_write_idx
+                write_end = current_write_idx + batch_frames
+            else:
+                # Subsequent batches with overlap: blend overlapping region
+                if temporal_overlap < batch_frames and current_write_idx >= temporal_overlap:
+                    # Blend overlapping region in-place on final_video
+                    prev_tail = ctx['final_video'][current_write_idx - temporal_overlap:current_write_idx]
+                    cur_head = sample[:temporal_overlap]
+                    
+                    # Move to same device for blending if needed
+                    if prev_tail.device != cur_head.device:
+                        cur_head = cur_head.to(prev_tail.device)
+                    
+                    blended = blend_overlapping_frames(prev_tail, cur_head, temporal_overlap)
+                    ctx['final_video'][current_write_idx - temporal_overlap:current_write_idx] = blended
+                    
+                    debug.log(f"Blended {temporal_overlap} overlapping frames at positions {current_write_idx - temporal_overlap}-{current_write_idx}", 
+                             category="video", indent_level=1)
+                    
+                    # Write only non-overlapping part
+                    sample = sample[temporal_overlap:]
+                    batch_frames = sample.shape[0]
+                    del prev_tail, cur_head, blended
+                
+                write_start = current_write_idx
+                write_end = current_write_idx + batch_frames
+            
+            # Move sample to target device and write directly to final_video
+            sample = manage_tensor(
+                tensor=sample,
+                target_device=target_device,
+                tensor_name=f"sample_{decode_idx+1}",
+                dtype=ctx['compute_dtype'],
+                debug=debug,
+                reason="writing to final_video",
+                indent_level=1
+            )
+            
+            # Write to final_video - for RGBA, write only RGB channels (VAE outputs 3 channels)
+            if ctx.get('is_rgba', False):
+                ctx['final_video'][write_start:write_end, :, :, :3] = sample
+            else:
+                ctx['final_video'][write_start:write_end] = sample
+            
+            # Store batch info for Phase 4 processing
+            ctx['decode_batch_info'].append((write_start, write_end, decode_idx, ori_length))
+            current_write_idx = write_end
+            
+            debug.log(f"Wrote {batch_frames} frames to positions {write_start}-{write_end}", 
+                     category="video", indent_level=1)
+            
+            # Free memory immediately - no batch_samples storage
             release_tensor_memory(ctx['all_upscaled_latents'][batch_idx])
             ctx['all_upscaled_latents'][batch_idx] = None
-            del upscaled_latent, samples
+            del upscaled_latent, sample
             
             debug.end_timer(f"decode_batch_{decode_idx+1}", f"Decoded batch {decode_idx+1}")
             
@@ -940,6 +1024,9 @@ def decode_all_batches(
                                 1, "Phase 3: Decoding")
             
             decode_idx += 1
+        
+        # Store padding stats for Phase 4 final summary
+        ctx['total_padding_removed'] = total_padding_removed
             
     except Exception as e:
         debug.log(f"Error in Phase 3 (Decoding): {e}", level="ERROR", category="error", force=True)
@@ -971,14 +1058,12 @@ def postprocess_all_batches(
     """
     Phase 4: Post-processing and Final Assembly.
     
-    Applies color correction and assembles the final video from decoded batches.
-    Uses stream-based direct writing to minimize memory usage - processes each
-    batch and writes directly to pre-allocated output tensor without accumulating
-    intermediate results. Automatically applies temporal overlap blending and 
-    removes prepended frames if specified.
+    Processes final_video slices in-place: applies alpha upscaling, color correction,
+    and normalization. Reads from and writes back to the same final_video tensor
+    to avoid memory duplication.
     
     Args:
-        ctx: Context from decode_all_batches containing batch_samples (required)
+        ctx: Context from decode_all_batches containing final_video (required)
         debug: Debug instance for logging (required)
         progress_callback: Optional callback(current, total, frames, phase_name)
         color_correction: Color correction method - "wavelet", "adain", or "none" (default: "wavelet")
@@ -992,7 +1077,7 @@ def postprocess_all_batches(
             - All intermediate storage cleared for memory efficiency
             
     Raises:
-        ValueError: If context is missing or has no batch samples
+        ValueError: If context is missing or has no final_video
     """
     if debug is None:
         raise ValueError("Debug instance must be provided to postprocess_all_batches")
@@ -1000,9 +1085,13 @@ def postprocess_all_batches(
     if ctx is None:
         raise ValueError("Context is required for postprocess_all_batches. Run decode_all_batches first.")
     
-    # Validate we have batch samples
-    if 'batch_samples' not in ctx or not ctx['batch_samples']:
-        raise ValueError("No batch samples found. Run decode_all_batches first.")
+    # Validate we have final_video (pre-allocated in decode_all_batches)
+    if 'final_video' not in ctx or ctx['final_video'] is None:
+        raise ValueError("final_video not found. Run decode_all_batches first.")
+    
+    # Validate we have batch info for processing
+    if 'decode_batch_info' not in ctx or not ctx['decode_batch_info']:
+        raise ValueError("decode_batch_info not found. Run decode_all_batches first.")
     
     debug.log("", category="none", force=True)
     debug.log("━━━━━━━━ Phase 4: Post-processing ━━━━━━━━", category="none", force=True)
@@ -1017,8 +1106,9 @@ def postprocess_all_batches(
         debug.log("No frames to process", level="WARNING", category="generation", force=True)
         return ctx
     
-    # Count valid samples for progress reporting
-    num_valid_samples = len([s for s in ctx['batch_samples'] if s is not None])
+    # Get batch info from decode phase
+    batch_info_list = ctx['decode_batch_info']
+    num_valid_samples = len(batch_info_list)
     
     # Calculate total post-processing work units
     # For RGBA: each batch needs 2 steps (alpha processing + color correction/assembly)
@@ -1035,15 +1125,12 @@ def postprocess_all_batches(
     
     current_postprocessing_step = 0
     
-    # Pre-allocation will happen after processing first sample to get exact dimensions
-    ctx['final_video'] = None
-    current_frame_idx = 0
-    
-    # Initialize padding tracking for final log message
-    total_padding_removed = 0
+    # Get padding stats from Phase 3
+    total_padding_removed = ctx.get('total_padding_removed', 0)
     
     # Alpha processing - handle RGBA inputs with edge-guided upscaling
-    if ctx.get('is_rgba', False) and 'all_alpha_channels' in ctx and 'all_input_rgb' in ctx:
+    # Process alpha on final_video slices in-place
+    if has_alpha_processing:
         debug.log("Processing Alpha channel with edge-guided upscaling...", category="alpha")
         
         # Validate alpha channel data exists
@@ -1051,10 +1138,7 @@ def postprocess_all_batches(
             debug.log("WARNING: Alpha channel data malformed, skipping alpha processing", 
                      level="WARNING", category="alpha", force=True)
         else:
-            for batch_idx in range(len(ctx['batch_samples'])):
-                if ctx['batch_samples'][batch_idx] is None:
-                    continue
-                
+            for write_start, write_end, batch_idx, ori_length in batch_info_list:
                 # Bounds checking for alpha channel lists
                 if batch_idx >= len(ctx['all_alpha_channels']) or ctx['all_alpha_channels'][batch_idx] is None:
                     continue
@@ -1068,15 +1152,41 @@ def postprocess_all_batches(
                 debug.log(f"Processing Alpha batch {batch_idx+1}/{num_valid_samples}", category="alpha", force=True)
                 debug.start_timer(f"alpha_batch_{batch_idx+1}")
 
+                # Get RGB slice from final_video for alpha processing
+                # final_video is [T, H, W, C], process_alpha_for_batch expects list of [T, C, H, W]
+                rgb_slice = ctx['final_video'][write_start:write_end, :, :, :3]  # Only RGB
+                rgb_tchw = rgb_slice.permute(0, 3, 1, 2)  # [T, H, W, 3] → [T, 3, H, W]
+                
                 # Process Alpha and merge with RGB
-                ctx['batch_samples'][batch_idx] = process_alpha_for_batch(
-                    rgb_samples=ctx['batch_samples'][batch_idx],
+                processed_samples = process_alpha_for_batch(
+                    rgb_samples=[rgb_tchw],
                     alpha_original=ctx['all_alpha_channels'][batch_idx],
                     rgb_original=ctx['all_input_rgb'][batch_idx],
                     device=ctx['vae_device'],
                     compute_dtype=ctx['compute_dtype'],
                     debug=debug
                 )
+                
+                # processed_samples[0] is [T, 4, H, W] (RGBA)
+                # Extract only the alpha channel and write to final_video's alpha slot
+                processed_rgba = processed_samples[0]  # [T, 4, H, W]
+                alpha_channel = processed_rgba[:, 3:4, :, :]  # [T, 1, H, W]
+                alpha_thwc = alpha_channel.permute(0, 2, 3, 1)  # [T, 1, H, W] → [T, H, W, 1]
+                
+                alpha_thwc = manage_tensor(
+                    tensor=alpha_thwc,
+                    target_device=ctx['final_video'].device,
+                    tensor_name=f"alpha_channel_{batch_idx+1}",
+                    dtype=ctx['compute_dtype'],
+                    debug=debug,
+                    reason="writing alpha channel to final_video",
+                    indent_level=1
+                )
+                
+                # Write only the alpha channel to the 4th channel slot
+                ctx['final_video'][write_start:write_end, :, :, 3:4] = alpha_thwc
+                
+                del rgb_slice, rgb_tchw, processed_samples, processed_rgba, alpha_channel, alpha_thwc
                 
                 # Free memory immediately
                 release_tensor_memory(ctx['all_alpha_channels'][batch_idx])
@@ -1096,221 +1206,165 @@ def postprocess_all_batches(
         debug.log("Alpha processing complete for all batches", category="alpha")
     
     try:
-        # Stream-based processing: write directly to final_video without accumulation
-        for batch_idx, samples in enumerate(ctx['batch_samples']):
-            if samples is None:
-                continue
-                
+        # Process each batch slice in final_video in-place
+        for info_idx, (write_start, write_end, batch_idx, ori_length) in enumerate(batch_info_list):
             check_interrupt(ctx)
             
-            debug.log(f"Post-processing batch {batch_idx+1}/{num_valid_samples}", category="video", force=True)
-            debug.start_timer(f"postprocess_batch_{batch_idx+1}")
+            debug.log(f"Post-processing batch {info_idx+1}/{num_valid_samples}", category="video", force=True)
+            debug.start_timer(f"postprocess_batch_{info_idx+1}")
             
-            # Post-process each sample in the batch
-            for i, sample in enumerate(samples):
-                # Move to VAE device with correct dtype for processing (no-op if already there)
-                sample = manage_tensor(
-                    tensor=sample,
-                    target_device=ctx['vae_device'],
-                    tensor_name=f"sample_{batch_idx+1}_{i}",
-                    dtype=ctx['compute_dtype'],
-                    debug=debug,
-                    reason="post-processing",
-                    indent_level=1
-                )
-                
-                # Get original length for trimming (always available)
-                video_idx = min(batch_idx, len(ctx['all_ori_lengths']) - 1)
-                ori_length = ctx['all_ori_lengths'][video_idx] if 'all_ori_lengths' in ctx else sample.shape[0]
-                
-                # Reconstruct transformed video on-demand for color correction
-                input_video = None
-                if color_correction != "none" and ctx.get('batch_metadata') is not None:
-                    if video_idx < len(ctx['batch_metadata']) and ctx['batch_metadata'][video_idx] is not None:
-                        # Reconstruct transformation
-                        transformed_video = _reconstruct_and_transform_batch(ctx, video_idx, debug)
-                        input_video = optimized_single_video_rearrange(transformed_video)
-                        del transformed_video
-                
-                # Trim both sample and input_video to original length if necessary (handles temporal padding)
-                if ori_length < sample.shape[0]:
-                    padding_removed = sample.shape[0] - ori_length
-                    debug.log(f"Removing padding: {padding_removed} frame{'s' if padding_removed != 1 else ''} trimmed ({sample.shape[0]} -> {ori_length})", 
-                            category="video", force=True, indent_level=1)
-                    sample = sample[:ori_length]
-                    if input_video is not None:
-                        input_video = input_video[:ori_length]
+            # Get slice from final_video - currently in [T, H, W, C] format, values in [-1, 1]
+            sample_thwc = ctx['final_video'][write_start:write_end]
+            
+            # For RGBA, we only process RGB channels for color correction
+            # Alpha was already written during alpha processing above
+            if ctx.get('is_rgba', False) and sample_thwc.shape[-1] == 4:
+                sample_thwc_rgb = sample_thwc[..., :3]  # [T, H, W, 3]
+                sample = sample_thwc_rgb.permute(0, 3, 1, 2)  # [T, H, W, 3] → [T, 3, H, W]
+            else:
+                sample = sample_thwc.permute(0, 3, 1, 2)  # [T, H, W, C] → [T, C, H, W]
+            
+            # Move to VAE device for processing
+            sample = manage_tensor(
+                tensor=sample,
+                target_device=ctx['vae_device'],
+                tensor_name=f"sample_{info_idx+1}",
+                dtype=ctx['compute_dtype'],
+                debug=debug,
+                reason="post-processing",
+                indent_level=1
+            )
+            
+            # Reconstruct transformed video on-demand for color correction
+            input_video = None
+            if color_correction != "none" and ctx.get('batch_metadata') is not None:
+                if batch_idx < len(ctx['batch_metadata']) and ctx['batch_metadata'][batch_idx] is not None:
+                    # Reconstruct transformation
+                    transformed_video = _reconstruct_and_transform_batch(ctx, batch_idx, debug)
+                    input_video = optimized_single_video_rearrange(transformed_video)
+                    del transformed_video
                     
-                    # Accumulate padding removed across all batches
-                    total_padding_removed += padding_removed
-                
-                # Trim spatial dimensions to true target size (removes divisible padding)
-                if 'true_target_dims' in ctx:
-                    true_h, true_w = ctx['true_target_dims']
-                    current_h, current_w = sample.shape[-2:]
+                    # For batches after the first with temporal overlap, the overlap frames
+                    # were blended in Phase 3 and are not part of this slice. Skip them.
+                    actual_overlap = ctx.get('actual_temporal_overlap', 0)
+                    if info_idx > 0 and actual_overlap > 0:
+                        input_video = input_video[actual_overlap:]
                     
-                    if current_h != true_h or current_w != true_w:
-                        debug.log(f"Trimming spatial padding: {current_w}x{current_h} → {true_w}x{true_h}", 
-                                category="video", indent_level=1)
-                        
-                        # Trim from bottom-right to match padding location
-                        sample = sample[:, :, :true_h, :true_w]
-                        if input_video is not None:
+                    # Trim input_video to match sample length (handles padding differences)
+                    if input_video.shape[0] > sample.shape[0]:
+                        input_video = input_video[:sample.shape[0]]
+                    
+                    # Trim spatial dimensions to true target size
+                    if 'true_target_dims' in ctx:
+                        true_h, true_w = ctx['true_target_dims']
+                        if input_video.shape[-2] != true_h or input_video.shape[-1] != true_w:
                             input_video = input_video[:, :, :true_h, :true_w]
+            
+            # Apply color correction if enabled (RGB only)
+            if color_correction != "none" and input_video is not None:
+                # Check if RGBA (samples are in T, C, H, W format at this point)
+                has_alpha = ctx.get('is_rgba', False)
+                alpha_channel = None
                 
-                # Apply color correction if enabled (RGB only)
-                if color_correction != "none" and input_video is not None:
-                    # Check if RGBA (samples are in T, C, H, W format at this point)
-                    has_alpha = ctx.get('is_rgba', False)
-                    alpha_channel = None
-                    
-                    if has_alpha:
-                        # Check actual channel count
-                        if sample.shape[1] == 4:
-                            # Extract and temporarily store alpha for reattachment after color correction
-                            alpha_channel = sample[:, 3:4, :, :]  # (T, 1, H, W)
-                            sample = sample[:, :3, :, :]  # Keep only RGB (T, 3, H, W)
-                    
-                    # Ensure both tensors are on same device (GPU) for color correction
-                    if input_video.device != sample.device:
-                        input_video = manage_tensor(
-                            tensor=input_video,
-                            target_device=sample.device,
-                            tensor_name=f"input_video_{batch_idx+1}",
-                            debug=debug,
-                            reason="color correction",
-                            indent_level=1
-                        )
-                        
-                    # Apply selected color correction method
-                    debug.start_timer(f"color_correction_{color_correction}")
-                    
-                    if color_correction == "lab":
-                        debug.log("Applying LAB perceptual color transfer", category="video", force=True, indent_level=1)
-                        sample = lab_color_transfer(sample, input_video, debug, luminance_weight=0.8)
-                    elif color_correction == "wavelet_adaptive":
-                        debug.log("Applying wavelet with adaptive saturation correction", category="video", force=True, indent_level=1)
-                        sample = wavelet_adaptive_color_correction(sample, input_video, debug)
-                    elif color_correction == "wavelet":
-                        debug.log("Applying wavelet color reconstruction", category="video", force=True, indent_level=1)
-                        sample = wavelet_reconstruction(sample, input_video, debug)
-                    elif color_correction == "hsv":
-                        debug.log("Applying HSV hue-conditional saturation matching", category="video", force=True, indent_level=1)
-                        sample = hsv_saturation_histogram_match(sample, input_video, debug)
-                    elif color_correction == "adain":
-                        debug.log("Applying AdaIN color correction", category="video", force=True, indent_level=1)
-                        sample = adaptive_instance_normalization(sample, input_video)
-                    else:
-                        debug.log(f"Unknown color correction method: {color_correction}", level="WARNING", category="video", force=True, indent_level=1)
-                    
-                    debug.end_timer(f"color_correction_{color_correction}", f"Color correction ({color_correction})")
-                    
-                    # Free the reconstructed transformed video
-                    del input_video
-
-                    # Recombine with Alpha if it was present in input
-                    if has_alpha and alpha_channel is not None:
-                        # Concatenate in channels-first: (T, 3, H, W) + (T, 1, H, W) -> (T, 4, H, W)
-                        sample = torch.cat([sample, alpha_channel], dim=1)
+                if has_alpha:
+                    # Check actual channel count
+                    if sample.shape[1] == 4:
+                        # Extract and temporarily store alpha for reattachment after color correction
+                        alpha_channel = sample[:, 3:4, :, :]  # (T, 1, H, W)
+                        sample = sample[:, :3, :, :]  # Keep only RGB (T, 3, H, W)
                 
-                else:
-                    debug.log("Color correction disabled (set to none)", category="video", indent_level=1)
-                
-                # Free the original length entry
-                if 'all_ori_lengths' in ctx and video_idx < len(ctx['all_ori_lengths']):
-                    ctx['all_ori_lengths'][video_idx] = None
-                
-                # Convert to final format (still on GPU at this point)
-                sample = optimized_sample_to_image_format(sample)
-                
-                # Apply normalization only to RGB channels, preserve Alpha as-is
-                if ctx.get('is_rgba', False) and sample.shape[-1] == 4:
-                    # Split RGBA: sample is (T, H, W, C) format after optimized_sample_to_image_format
-                    rgb_channels = sample[..., :3]  # (T, H, W, 3)
-                    alpha_channel = sample[..., 3:4]  # (T, H, W, 1)
-                    
-                    # Normalize only RGB from [-1, 1] to [0, 1]
-                    rgb_channels = rgb_channels.clip(-1, 1).mul_(0.5).add_(0.5)
-                    
-                    # Merge back with unchanged Alpha
-                    sample = torch.cat([rgb_channels, alpha_channel], dim=-1)
-                else:
-                    # RGB only: apply normalization as usual
-                    sample = sample.clip(-1, 1).mul_(0.5).add_(0.5)
-                
-                # Draw tile boundaries for debugging (if tile info available)
-                for phase, attr in [('encode', 'encode_tile_boundaries'), ('decode', 'decode_tile_boundaries')]:
-                    tiles = getattr(debug, attr, None)
-                    if tiles:
-                        sample = _draw_tile_boundaries(sample, debug, tiles, phase)
-                        break
-                
-                # Move to tensor_offload_device if specified
-                if ctx['tensor_offload_device'] is not None:
-                    sample = manage_tensor(
-                        tensor=sample,
-                        target_device=ctx['tensor_offload_device'],
-                        tensor_name=f"sample_{batch_idx+1}_{i}_final",
+                # Ensure both tensors are on same device (GPU) for color correction
+                if input_video.device != sample.device:
+                    input_video = manage_tensor(
+                        tensor=input_video,
+                        target_device=sample.device,
+                        tensor_name=f"input_video_{info_idx+1}",
                         debug=debug,
-                        reason="storing final processed samples",
+                        reason="color correction",
                         indent_level=1
                     )
-                
-                # Get batch dimensions
-                batch_frames = sample.shape[0]
-                
-                # Pre-allocate output tensor on first write
-                if ctx['final_video'] is None:
-                    H, W = sample.shape[1], sample.shape[2]
-                    # Use input format, not first sample's shape, for consistent allocation
-                    C = 4 if ctx.get('is_rgba', False) else 3
-                    channels_str = "RGBA" if C == 4 else "RGB"
                     
-                    debug.log(f"Pre-allocating output tensor: {total_frames} frames, {W}x{H}px, {channels_str}", category="setup")
-                    
-                    target_device = ctx['tensor_offload_device'] if ctx['tensor_offload_device'] is not None else ctx['vae_device']
-                    ctx['final_video'] = torch.empty((total_frames, H, W, C), dtype=ctx['compute_dtype'], device=target_device)
-
-                # Write with temporal overlap blending if enabled
-                if batch_idx == 0 or temporal_overlap == 0:
-                    # First batch or no overlap: write all frames normally
-                    ctx['final_video'][current_frame_idx:current_frame_idx + batch_frames] = sample
-                    current_frame_idx += batch_frames
+                # Apply selected color correction method
+                debug.start_timer(f"color_correction_{color_correction}")
+                
+                if color_correction == "lab":
+                    debug.log("Applying LAB perceptual color transfer", category="video", force=True, indent_level=1)
+                    sample = lab_color_transfer(sample, input_video, debug, luminance_weight=0.8)
+                elif color_correction == "wavelet_adaptive":
+                    debug.log("Applying wavelet with adaptive saturation correction", category="video", force=True, indent_level=1)
+                    sample = wavelet_adaptive_color_correction(sample, input_video, debug)
+                elif color_correction == "wavelet":
+                    debug.log("Applying wavelet color reconstruction", category="video", force=True, indent_level=1)
+                    sample = wavelet_reconstruction(sample, input_video, debug)
+                elif color_correction == "hsv":
+                    debug.log("Applying HSV hue-conditional saturation matching", category="video", force=True, indent_level=1)
+                    sample = hsv_saturation_histogram_match(sample, input_video, debug)
+                elif color_correction == "adain":
+                    debug.log("Applying AdaIN color correction", category="video", force=True, indent_level=1)
+                    sample = adaptive_instance_normalization(sample, input_video)
                 else:
-                    # Subsequent batches with overlap: blend overlapping region in-place
-                    if temporal_overlap < batch_frames and current_frame_idx >= temporal_overlap:
-                        # Get overlapping regions
-                        prev_tail = ctx['final_video'][current_frame_idx - temporal_overlap:current_frame_idx]
-                        cur_head = sample[:temporal_overlap]
-                        
-                        # Log blending operation
-                        blend_range_start = current_frame_idx - temporal_overlap
-                        blend_range_end = current_frame_idx
-                        debug.log(f"Blending {temporal_overlap} overlapping frames (positions {blend_range_start}-{blend_range_end})", 
-                                 category="video", indent_level=1)
-                        
-                        # Blend and replace in-place
-                        blended = blend_overlapping_frames(prev_tail, cur_head, temporal_overlap)
-                        ctx['final_video'][current_frame_idx - temporal_overlap:current_frame_idx] = blended
-                        
-                        # Write non-overlapping part
-                        non_overlapping = sample[temporal_overlap:]
-                        non_overlapping_count = non_overlapping.shape[0]
-                        ctx['final_video'][current_frame_idx:current_frame_idx + non_overlapping_count] = non_overlapping
-                        current_frame_idx += non_overlapping_count
-                    else:
-                        # Edge case: write normally if overlap >= batch_frames
-                        ctx['final_video'][current_frame_idx:current_frame_idx + batch_frames] = sample
-                        current_frame_idx += batch_frames
+                    debug.log(f"Unknown color correction method: {color_correction}", level="WARNING", category="video", force=True, indent_level=1)
                 
-                # Immediately release sample memory
-                del sample
+                debug.end_timer(f"color_correction_{color_correction}", f"Color correction ({color_correction})")
                 
-            # Clear batch samples as we go to free memory progressively
-            release_tensor_memory(ctx['batch_samples'][batch_idx])
-            ctx['batch_samples'][batch_idx] = None
+                # Free the reconstructed transformed video
+                del input_video
+
+                # Recombine with Alpha if it was present in input
+                if has_alpha and alpha_channel is not None:
+                    # Concatenate in channels-first: (T, 3, H, W) + (T, 1, H, W) -> (T, 4, H, W)
+                    sample = torch.cat([sample, alpha_channel], dim=1)
             
-            debug.end_timer(f"postprocess_batch_{batch_idx+1}", f"Post-processed batch {batch_idx+1}")
+            else:
+                debug.log("Color correction disabled (set to none)", category="video", indent_level=1)
+            
+            # Convert to final format: [T, C, H, W] → [T, H, W, C]
+            sample = optimized_sample_to_image_format(sample)
+            
+            # Apply normalization only to RGB channels, preserve Alpha as-is
+            if ctx.get('is_rgba', False) and sample.shape[-1] == 4:
+                # Split RGBA: sample is (T, H, W, C) format after optimized_sample_to_image_format
+                rgb_channels = sample[..., :3]  # (T, H, W, 3)
+                alpha_channel = sample[..., 3:4]  # (T, H, W, 1)
+                
+                # Normalize only RGB from [-1, 1] to [0, 1]
+                rgb_channels.clamp_(-1, 1).mul_(0.5).add_(0.5)
+                
+                # Merge back with unchanged Alpha
+                sample = torch.cat([rgb_channels, alpha_channel], dim=-1)
+            else:
+                # RGB only: apply normalization as usual
+                sample.clamp_(-1, 1).mul_(0.5).add_(0.5)
+            
+            # Draw tile boundaries for debugging (if tile info available)
+            for phase, attr in [('encode', 'encode_tile_boundaries'), ('decode', 'decode_tile_boundaries')]:
+                tiles = getattr(debug, attr, None)
+                if tiles:
+                    sample = _draw_tile_boundaries(sample, debug, tiles, phase)
+                    break
+            
+            # Move to final_video device and write back in-place
+            sample = manage_tensor(
+                tensor=sample,
+                target_device=ctx['final_video'].device,
+                tensor_name=f"sample_{info_idx+1}_final",
+                dtype=ctx['compute_dtype'],
+                debug=debug,
+                reason="writing processed result to final_video",
+                indent_level=1
+            )
+            
+            # Write back to final_video in-place
+            # For RGBA, write only RGB channels (alpha already written during alpha processing)
+            if ctx.get('is_rgba', False) and ctx['final_video'].shape[-1] == 4:
+                ctx['final_video'][write_start:write_end, :, :, :3] = sample
+            else:
+                ctx['final_video'][write_start:write_end] = sample
+            
+            # Free sample memory
+            del sample, sample_thwc
+            
+            debug.end_timer(f"postprocess_batch_{info_idx+1}", f"Post-processed batch {info_idx+1}")
             
             # Update progress for main processing step
             current_postprocessing_step += 1
@@ -1362,10 +1416,6 @@ def postprocess_all_batches(
             
             debug.log(f"Final output assembled: {frame_info}, Resolution: {Wf}x{Hf}px, Channels: {channels_str}", 
                     category="generation", force=True)
-            
-            if current_frame_idx != total_frames:
-                debug.log(f"WARNING: Frame count mismatch - expected {total_frames}, wrote {current_frame_idx}", 
-                        level="WARNING", category="generation", force=True)
         else:
             ctx['final_video'] = torch.empty((0, 0, 0, 0), dtype=ctx['compute_dtype'])
             debug.log("No frames were processed", level="WARNING", category="generation", force=True)
@@ -1374,11 +1424,11 @@ def postprocess_all_batches(
         debug.log(f"Error in Phase 4 (Post-processing): {e}", level="ERROR", category="generation", force=True)
         raise
     finally:
-        # 1. Clean up batch_samples from context (already mostly freed during processing)
-        if 'batch_samples' in ctx and ctx['batch_samples']:
-            release_tensor_collection(ctx['batch_samples'])
-            ctx['batch_samples'].clear()
-            del ctx['batch_samples']
+        # 1. Clean up decode_batch_info and padding stats
+        if 'decode_batch_info' in ctx:
+            del ctx['decode_batch_info']
+        if 'total_padding_removed' in ctx:
+            del ctx['total_padding_removed']
         
         # 2. Clean up video transform caches
         if 'video_transform' in ctx and ctx['video_transform'] is not None:

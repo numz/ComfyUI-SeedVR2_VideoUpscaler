@@ -178,7 +178,7 @@ def wavelet_decomposition(image: Tensor, levels: int = 5) -> tuple[Tensor, Tenso
     for i in range(levels):
         radius = 2 ** i
         low_freq = wavelet_blur(image, radius)
-        high_freq += (image - low_freq)
+        high_freq.add_(image).sub_(low_freq)
         image = low_freq
     
     return high_freq, low_freq
@@ -237,13 +237,13 @@ def wavelet_reconstruction(content_feat: Tensor, style_feat: Tensor, debug: Opti
             align_corners=False
         )
     
-    # Reconstruct: content details + style color
-    result = content_high_freq + style_low_freq
+    # Reconstruct: content details + style color (in-place on content_high_freq)
+    content_high_freq.add_(style_low_freq)
     
-    # Safety clamp for normalized SDR range
+    # Safety clamp for normalized SDR range (in-place)
     # This prevents numerical errors from propagating
     # Note: For HDR support, this would need to be removed
-    return torch.clamp(result, -1.0, 1.0)
+    return content_high_freq.clamp_(-1.0, 1.0)
 
 
 def lab_color_transfer(
@@ -255,17 +255,15 @@ def lab_color_transfer(
     """
     Perceptually-accurate color transfer using CIELAB color space.
     
-    LAB provides superior perceptual uniformity compared to RGB/HSV, enabling
-    highly accurate color matching that preserves the original image's appearance.
-    This is the RECOMMENDED method for color correction.
+    Combines wavelet reconstruction (for spatial continuity) with LAB histogram
+    matching (for precise color matching). This eliminates tile artifacts while
+    providing superior color accuracy.
     
     Algorithm:
-    1. Convert both images to LAB color space (D65 illuminant)
-    2. Apply histogram matching to all LAB channels:
-       - L* (luminance): Weighted blend to preserve detail
-       - a* (green-red): Full histogram matching
-       - b* (blue-yellow): Full histogram matching
-    3. Convert back to RGB
+    1. Apply wavelet reconstruction to get artifact-free base
+    2. Convert both wavelet result and style to LAB color space
+    3. Apply histogram matching to LAB channels
+    4. Convert back to RGB
     
     Args:
         content_feat: Target tensor [B, C, H, W] in [-1, 1] with upscaled details
@@ -278,7 +276,10 @@ def lab_color_transfer(
     Returns:
         Color-corrected tensor [B, C, H, W] in [-1, 1]
     """
-    # Handle spatial dimension mismatch
+    # Step 1: Apply wavelet to get artifact-free base with correct spatial structure
+    content_feat = wavelet_reconstruction(content_feat, style_feat, debug=None)
+    
+    # Handle spatial dimension mismatch (should already match after wavelet)
     if content_feat.shape != style_feat.shape:
         debug.log(
             f"LAB: Resizing style {style_feat.shape} to match content {content_feat.shape}",
@@ -291,14 +292,14 @@ def lab_color_transfer(
             align_corners=False
         )
     
-    # Store device
+    # Store device and convert to float32
     device = content_feat.device
     
     # Convert to float32 for accurate color space conversion
     content_feat, original_dtype = ensure_float32_precision(content_feat)
     style_feat, _ = ensure_float32_precision(style_feat)
     
-    # Precompute color space conversion matrices (once per batch, not per pixel)
+    # Precompute color space conversion matrices
     rgb_to_xyz_matrix = torch.tensor([
         [0.4124564, 0.3575761, 0.1804375],
         [0.2126729, 0.7151522, 0.0721750],
@@ -315,17 +316,16 @@ def lab_color_transfer(
     epsilon = 6.0 / 29.0
     kappa = (29.0 / 3.0) ** 3
     
-    # Convert from [-1, 1] to [0, 1] range (in-place where possible)
-    content_rgb = content_feat.add(1.0).mul_(0.5).clamp_(0.0, 1.0)
-    style_rgb = style_feat.add(1.0).mul_(0.5).clamp_(0.0, 1.0)
-    del content_feat, style_feat
+    # Convert from [-1, 1] to [0, 1] range (in-place)
+    content_feat.add_(1.0).mul_(0.5).clamp_(0.0, 1.0)
+    style_feat.add_(1.0).mul_(0.5).clamp_(0.0, 1.0)
     
     # Convert to LAB color space
-    content_lab = _rgb_to_lab_batch(content_rgb, device, rgb_to_xyz_matrix, epsilon, kappa)
-    del content_rgb
+    content_lab = _rgb_to_lab_batch(content_feat, device, rgb_to_xyz_matrix, epsilon, kappa)
+    del content_feat
     
-    style_lab = _rgb_to_lab_batch(style_rgb, device, rgb_to_xyz_matrix, epsilon, kappa)
-    del style_rgb, rgb_to_xyz_matrix
+    style_lab = _rgb_to_lab_batch(style_feat, device, rgb_to_xyz_matrix, epsilon, kappa)
+    del style_feat, rgb_to_xyz_matrix
     
     # Match chrominance channels (a*, b*) for accurate color transfer
     matched_a = _histogram_matching_channel(content_lab[:, 1], style_lab[:, 1], device)

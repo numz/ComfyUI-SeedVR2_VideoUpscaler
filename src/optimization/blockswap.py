@@ -144,22 +144,21 @@ def apply_block_swap_to_dit(
 
     total_blocks = len(model.blocks)
     
-    # Log configuration clearly based on what's enabled
-    block_text = "block" if blocks_to_swap <= 1 else "blocks"
-    if blocks_to_swap > 0 and swap_io_components:
-        debug.log(f"BlockSwap: {blocks_to_swap} transformer {block_text} + I/O components offloaded to {str(offload_device).upper()}", category="blockswap", force=True)
-    elif blocks_to_swap > 0:
-        debug.log(f"BlockSwap: {blocks_to_swap} transformer {block_text} offloaded to {str(offload_device).upper()}", category="blockswap", force=True)
-    elif swap_io_components:
-        debug.log(f"BlockSwap: I/O components offloaded to {str(offload_device).upper()} (blocks remain on GPU)", category="blockswap", force=True)
+    # Clamp blocks_to_swap to available blocks BEFORE logging
+    effective_blocks = min(blocks_to_swap, total_blocks) if blocks_to_swap > 0 else 0
     
-    debug.log(f"Model has {total_blocks} transformer blocks", category="blockswap")
+    # Log configuration clearly based on what's enabled
+    block_text = "block" if effective_blocks <= 1 else "blocks"
+    if effective_blocks > 0 and swap_io_components:
+        debug.log(f"BlockSwap: {effective_blocks}/{total_blocks} transformer {block_text} + I/O components offloaded to {str(offload_device).upper()}", category="blockswap", force=True)
+    elif effective_blocks > 0:
+        debug.log(f"BlockSwap: {effective_blocks}/{total_blocks} transformer {block_text} offloaded to {str(offload_device).upper()}", category="blockswap", force=True)
+    elif swap_io_components:
+        debug.log(f"BlockSwap: I/O components offloaded to {str(offload_device).upper()} (0/{total_blocks} blocks swapped)", category="blockswap", force=True)
     
     # Configure model with blockswap attributes
     if blocks_to_swap > 0:
-        blocks_to_swap = min(blocks_to_swap, total_blocks)
-        model.blocks_to_swap = blocks_to_swap - 1  # Convert to 0-indexed
-        debug.log(f"Transformer blocks to swap: {blocks_to_swap}/{total_blocks}", category="blockswap")
+        model.blocks_to_swap = effective_blocks - 1  # Convert to 0-indexed
     else:
         # No block swapping, set to -1 so no blocks match the swap condition
         model.blocks_to_swap = -1

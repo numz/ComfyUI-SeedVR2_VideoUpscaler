@@ -26,40 +26,12 @@ from ..common.diffusion import (
 from ..common.distributed import (
     get_device,
 )
+from ..optimization.performance import (
+    optimized_channels_to_last,
+    optimized_channels_to_second
+)
 from ..models.dit_3b import na
 
-
-def optimized_channels_to_last(tensor):
-    """🚀 Optimized replacement for rearrange(tensor, 'b c ... -> b ... c')
-    Moves channels from position 1 to last position using PyTorch native operations.
-    """
-    if tensor.ndim == 3:  # [batch, channels, spatial]
-        return tensor.permute(0, 2, 1)
-    elif tensor.ndim == 4:  # [batch, channels, height, width]
-        return tensor.permute(0, 2, 3, 1)
-    elif tensor.ndim == 5:  # [batch, channels, depth, height, width]
-        return tensor.permute(0, 2, 3, 4, 1)
-    else:
-        # Fallback for other dimensions - move channel (dim=1) to last
-        dims = list(range(tensor.ndim))
-        dims = [dims[0]] + dims[2:] + [dims[1]]  # [0, 2, 3, ..., 1]
-        return tensor.permute(*dims)
-
-def optimized_channels_to_second(tensor):
-    """🚀 Optimized replacement for rearrange(tensor, 'b ... c -> b c ...')
-    Moves channels from last position to position 1 using PyTorch native operations.
-    """
-    if tensor.ndim == 3:  # [batch, spatial, channels]
-        return tensor.permute(0, 2, 1)
-    elif tensor.ndim == 4:  # [batch, height, width, channels]
-        return tensor.permute(0, 3, 1, 2)
-    elif tensor.ndim == 5:  # [batch, depth, height, width, channels]
-        return tensor.permute(0, 4, 1, 2, 3)
-    else:
-        # Fallback for other dimensions - move last dim to position 1
-        dims = list(range(tensor.ndim))
-        dims = [dims[0], dims[-1]] + dims[1:-1]  # [0, -1, 1, 2, ..., -2]
-        return tensor.permute(*dims)
 
 class VideoDiffusionInfer():
     def __init__(self, config: DictConfig, debug: 'Debug',
@@ -201,7 +173,7 @@ class VideoDiffusionInfer():
                                             tile_overlap=self.encode_tile_overlap).posterior.mode().squeeze(2)
 
                 latent = latent.unsqueeze(2) if latent.ndim == 4 else latent
-                latent = rearrange(latent, "b c ... -> b ... c")
+                latent = optimized_channels_to_last(latent)
                 latent = (latent - shift) * scale
                 latents.append(latent)
 
@@ -248,7 +220,7 @@ class VideoDiffusionInfer():
 
             for i, latent in enumerate(latents):
                 latent = latent / scale + shift
-                latent = rearrange(latent, "b ... c -> b c ...")
+                latent = optimized_channels_to_second(latent)
                 latent = latent.squeeze(2)
 
                 # Detect VAE model dtype

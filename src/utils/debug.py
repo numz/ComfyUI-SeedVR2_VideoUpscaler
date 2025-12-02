@@ -14,6 +14,14 @@ from ..optimization.memory_manager import get_vram_usage, get_basic_vram_info, g
 from ..utils.constants import __version__
 
 
+def _format_peak_with_swap(peak_gb: float, total_vram_gb: float) -> str:
+    """Format peak memory, showing swap breakdown if overflow occurred."""
+    if total_vram_gb > 0 and peak_gb > total_vram_gb:
+        swap_gb = peak_gb - total_vram_gb
+        return f"{peak_gb:.2f}GB ({total_vram_gb:.0f}GB GPU + {swap_gb:.2f}GB swap)"
+    return f"{peak_gb:.2f}GB"
+
+
 class Debug:
     """
     Unified debug logging for generation pipeline and BlockSwap monitoring
@@ -72,7 +80,8 @@ class Debug:
         self.vram_history: List[float] = []
         self.active_timer_stack: List[str] = [] 
         self.timer_namespace: str = ""
-        self.phase_peaks: Dict[str, float] = {}
+        self.phase_vram_peaks: Dict[str, float] = {}
+        self.phase_ram_peaks: Dict[str, float] = {}
         
     @torch._dynamo.disable  # Skip tracing to avoid datetime.now() warnings
     def log(self, message: str, level: str = "INFO", category: str = "general", force: bool = False, indent_level: int = 0) -> None:
@@ -306,19 +315,30 @@ class Debug:
         if show_diff and self.memory_checkpoints:
             self._log_memory_diff(current_metrics=memory_info, force=force)
 
-       # Log detailed analysis if requested
+        # Warn if swap detected (peak > physical VRAM)
+        if memory_info['vram_total'] > 0 and memory_info['vram_peak_since_last'] > memory_info['vram_total']:
+            self.log("VRAM swap detected - severe slowdown expected. Consider optimizing (e.g., reduce resolution, batch_size, enable BlockSwap, VAE tiling...).", 
+                     level="WARNING", category="memory", force=True)
+
+        # Log detailed analysis if requested
         if detailed_tensors and tensor_stats.get('details'):
             self._log_detailed_tensor_analysis(details=tensor_stats['details'], force=force)
                 
         # Store checkpoint with memory limit
         self._store_checkpoint(label, memory_info)
 
-        # Update phase peak if we're in an active phase
-        if self.current_phase and memory_info['vram_peak_since_last'] > 0:
-            self.phase_peaks[self.current_phase] = max(
-                self.phase_peaks.get(self.current_phase, 0),
-                memory_info['vram_peak_since_last']
-            )
+        # Update phase peaks if we're in an active phase
+        if self.current_phase:
+            if memory_info['vram_peak_since_last'] > 0:
+                self.phase_vram_peaks[self.current_phase] = max(
+                    self.phase_vram_peaks.get(self.current_phase, 0),
+                    memory_info['vram_peak_since_last']
+                )
+            if memory_info['ram_process'] > 0:
+                self.phase_ram_peaks[self.current_phase] = max(
+                    self.phase_ram_peaks.get(self.current_phase, 0),
+                    memory_info['ram_process']
+                )
 
         # Reset PyTorch's peak memory stats for next interval
         reset_vram_peak(device=None, debug=self)
@@ -340,7 +360,7 @@ class Debug:
         }
         
         # VRAM metrics
-        if torch.cuda.is_available() or (hasattr(torch, 'mps') and callable(getattr(torch.mps, 'is_available', None)) and torch.mps.is_available()):
+        if torch.cuda.is_available() or (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()):
             metrics['vram_allocated'], metrics['vram_reserved'], current_global_peak = get_vram_usage(device=None, debug=self)
 
             # Calculate peak since last log_memory_state
@@ -353,10 +373,11 @@ class Debug:
                 metrics['vram_free'] = vram_info["free_gb"]
                 metrics['vram_total'] = vram_info["total_gb"]
                 
-                backend = "MPS" if (hasattr(torch, 'mps') and callable(getattr(torch.mps, 'is_available', None)) and torch.mps.is_available()) else "VRAM"
+                backend = "MPS" if (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()) else "VRAM"
+                peak_str = _format_peak_with_swap(metrics['vram_peak_since_last'], metrics['vram_total'])
                 metrics['summary_vram'] = (f"  [{backend}] {metrics['vram_allocated']:.2f}GB allocated / "
                         f"{metrics['vram_reserved']:.2f}GB reserved / "
-                        f"Peak: {metrics['vram_peak_since_last']:.2f}GB / "
+                        f"Peak: {peak_str} / "
                         f"{metrics['vram_free']:.2f}GB free / "
                         f"{metrics['vram_total']:.2f}GB total")
             else:
@@ -376,7 +397,7 @@ class Debug:
             metrics['summary_ram'] = ""
         
         # Update VRAM history for tracking
-        if torch.cuda.is_available() or (hasattr(torch, 'mps') and callable(getattr(torch.mps, 'is_available', None)) and torch.mps.is_available()):
+        if torch.cuda.is_available() or (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()):
             self.vram_history.append(metrics['vram_allocated'])
         
         return metrics
@@ -504,9 +525,9 @@ class Debug:
         if diffs:
             self.log(f"Memory changes: {', '.join(diffs)}", category="memory", force=force, indent_level=1)
     
-    def log_peak_vram_summary(self, force: bool = True) -> None:
-        """Display peak VRAM usage across all phases"""
-        if not self.phase_peaks:
+    def log_peak_memory_summary(self, force: bool = True) -> None:
+        """Display peak memory usage across all phases (VRAM and RAM combined)"""
+        if not self.phase_vram_peaks and not self.phase_ram_peaks:
             return
         
         phase_names = {
@@ -516,17 +537,38 @@ class Debug:
             'phase4': 'Post-processing'
         }
         
+        is_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() and not torch.cuda.is_available()
+        
+        # Get total VRAM for swap detection (reuse existing function)
+        total_vram_gb = 0.0
+        if not is_mps:
+            vram_info = get_basic_vram_info(device=None)
+            if "error" not in vram_info:
+                total_vram_gb = vram_info["total_gb"]
+        
         self.log("", category="none", force=force)
         self.log("────────────────────────", category="none", force=force)
-        self.log("Peak VRAM by Phase:", category="memory", force=force)
+        self.log("Peak memory by phase:", category="memory", force=force)
         
-        for phase_key in sorted(self.phase_peaks.keys()):
+        all_phases = sorted(set(self.phase_vram_peaks.keys()) | set(self.phase_ram_peaks.keys()))
+        for phase_key in all_phases:
             phase_num = phase_key[-1]
-            self.log(f"  Phase {phase_num}: {phase_names[phase_key]}: {self.phase_peaks[phase_key]:.2f}GB", 
-                    category="memory", force=force)
+            phase_name = phase_names.get(phase_key, phase_key)
+            vram = self.phase_vram_peaks.get(phase_key, 0)
+            ram = self.phase_ram_peaks.get(phase_key, 0)
+            
+            if is_mps:
+                self.log(f"  Phase {phase_num} ({phase_name}): {vram:.2f}GB", category="memory", force=force)
+            else:
+                self.log(f"  Phase {phase_num} ({phase_name}): {_format_peak_with_swap(vram, total_vram_gb)} | RAM {ram:.2f}GB", category="memory", force=force)
         
-        overall_max = max(self.phase_peaks.values())
-        self.log(f"Overall Peak VRAM: {overall_max:.2f}GB", category="memory", force=force)
+        if is_mps:
+            overall = max(self.phase_vram_peaks.values()) if self.phase_vram_peaks else 0
+            self.log(f"Overall Peak: {overall:.2f}GB", category="memory", force=force)
+        else:
+            overall_vram = max(self.phase_vram_peaks.values()) if self.phase_vram_peaks else 0
+            overall_ram = max(self.phase_ram_peaks.values()) if self.phase_ram_peaks else 0
+            self.log(f"Overall peak: {_format_peak_with_swap(overall_vram, total_vram_gb)} | RAM {overall_ram:.2f}GB", category="memory", force=force)
     
     @torch._dynamo.disable  # Skip tracing to avoid time.time() warnings
     def _store_checkpoint(self, label: str, metrics: Dict[str, Any]) -> None:
@@ -636,5 +678,6 @@ class Debug:
         self.timer_durations.clear()
         self.timer_messages.clear()
         self.active_timer_stack.clear()
-        self.phase_peaks.clear()
+        self.phase_vram_peaks.clear()
+        self.phase_ram_peaks.clear()
         self.current_phase = None

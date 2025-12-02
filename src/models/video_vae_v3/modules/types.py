@@ -74,3 +74,51 @@ class CausalEncoderOutput(NamedTuple):
 
 class CausalDecoderOutput(NamedTuple):
     sample: torch.Tensor
+
+
+class DecoderOutput:
+    """Output of decoding method - matches diffusers.models.autoencoders.vae.DecoderOutput"""
+    def __init__(self, sample: torch.Tensor, commit_loss: Optional[torch.Tensor] = None):
+        self.sample = sample
+        self.commit_loss = commit_loss
+
+
+class DiagonalGaussianDistribution:
+    """Matches diffusers.models.autoencoders.vae.DiagonalGaussianDistribution exactly."""
+    def __init__(self, parameters: torch.Tensor, deterministic: bool = False):
+        self.parameters = parameters
+        self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
+        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
+        self.deterministic = deterministic
+        self.std = torch.exp(0.5 * self.logvar)
+        self.var = torch.exp(self.logvar)
+        if self.deterministic:
+            self.var = self.std = torch.zeros_like(
+                self.mean, device=self.parameters.device, dtype=self.parameters.dtype
+            )
+
+    def sample(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
+        if self.deterministic:
+            return self.mode()
+        sample = torch.randn(
+            self.mean.shape,
+            generator=generator,
+            device=self.parameters.device,
+            dtype=self.parameters.dtype,
+        )
+        return self.mean + self.std * sample
+
+    def mode(self) -> torch.Tensor:
+        return self.mean
+
+    def kl(self, other: Optional["DiagonalGaussianDistribution"] = None) -> torch.Tensor:
+        if other is None:
+            return 0.5 * torch.sum(
+                self.mean.pow(2) + self.var - 1.0 - self.logvar,
+                dim=[1, 2, 3],
+            )
+        return 0.5 * torch.sum(
+            (self.mean - other.mean).pow(2) / other.var
+            + self.var / other.var - 1.0 - self.logvar + other.logvar,
+            dim=[1, 2, 3],
+        )

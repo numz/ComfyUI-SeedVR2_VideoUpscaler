@@ -31,7 +31,7 @@ class AreaResize:
         self.max_area = max_area
         self.downsample_only = downsample_only
         self.interpolation = interpolation
-        if hasattr(torch, 'mps') and callable(getattr(torch.mps, 'is_available', None)) and torch.mps.is_available():
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             self.interpolation = InterpolationMode.BILINEAR
 
     def __call__(self, image: Union[torch.Tensor, Image.Image]):
