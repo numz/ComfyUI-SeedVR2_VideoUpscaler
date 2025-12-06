@@ -822,16 +822,29 @@ def _worker_process(
     device_id: str, 
     frames_np: np.ndarray, 
     shared_args: Dict[str, Any], 
-    return_queue: mp.Queue
+    return_queue: mp.Queue,
+    shm_name: str = None,
+    shm_shape: Tuple[int, ...] = None,
+    shm_dtype: str = None
 ) -> None:
     """
     Worker process for multi-GPU upscaling.
     
     CUDA_VISIBLE_DEVICES is set by parent before spawn, so this worker
-    only sees its assigned GPU. Results returned via queue as numpy arrays.
+    only sees its assigned GPU. Results written to shared memory to avoid
+    pickling large arrays (which causes MemoryError with large videos).
+    
+    Args:
+        proc_idx: Worker index for result ordering
+        device_id: GPU device ID (mapped to "0" via CUDA_VISIBLE_DEVICES)
+        frames_np: Input frames as numpy array
+        shared_args: Processing arguments dict
+        return_queue: Queue for signaling completion (only small metadata sent)
+        shm_name: Shared memory name for writing results
+        shm_shape: Shape of the output array in shared memory
+        shm_dtype: Dtype string of the output array
     """
-    # Note: CUDA_VISIBLE_DEVICES and PYTORCH_CUDA_ALLOC_CONF are inherited
-    # from parent (set before spawn). torch is imported at module level.
+    from multiprocessing import shared_memory
     
     # Create debug instance for this worker
     worker_debug = Debug(enabled=shared_args["debug"])
@@ -851,8 +864,28 @@ def _worker_process(
         runner_cache=None  # No caching in multiprocessing mode
     )
     
-    # Send back result as numpy array
-    return_queue.put((proc_idx, result_tensor.numpy()))
+    # Convert result to numpy
+    result_np = result_tensor.numpy()
+    
+    # Write result to shared memory (avoids pickling large arrays)
+    if shm_name is not None:
+        try:
+            existing_shm = shared_memory.SharedMemory(name=shm_name)
+            # Create numpy array backed by shared memory
+            shm_array = np.ndarray(shm_shape, dtype=np.dtype(shm_dtype), buffer=existing_shm.buf)
+            # Copy result into shared memory
+            actual_frames = result_np.shape[0]
+            shm_array[:actual_frames] = result_np
+            existing_shm.close()
+            # Send back only metadata (no large array pickling)
+            return_queue.put((proc_idx, actual_frames, result_np.shape))
+        except Exception as e:
+            worker_debug.log(f"[WORKER {proc_idx}] Shared memory write failed: {e}, falling back to queue", 
+                           level="WARNING", category="memory", force=True)
+            return_queue.put((proc_idx, result_np))
+    else:
+        # Fallback for small results (shouldn't happen with large videos)
+        return_queue.put((proc_idx, result_np))
 
 
 def _single_gpu_direct_processing(
@@ -889,10 +922,12 @@ def _gpu_processing(
     
     Processing flow:
         1. Split frames into chunks (with overlap if enabled)
-        2. Spawn worker processes on each GPU
-        3. Wait for all workers to complete
-        4. Blend overlapping regions using Hann window crossfade
-        5. Remove prepended frames from final result
+        2. Allocate shared memory for each worker's output (avoids pickling)
+        3. Spawn worker processes on each GPU
+        4. Wait for all workers to complete
+        5. Read results from shared memory
+        6. Blend overlapping regions using Hann window crossfade
+        7. Remove prepended frames from final result
     
     Args:
         frames_tensor: Input frames [T, H, W, C], Float32, range [0,1]
@@ -908,9 +943,24 @@ def _gpu_processing(
         - Multi-GPU with overlap: Chunks sized to multiples of batch_size for
           proper temporal blending
         - Prepended frames removed after all GPU workers complete (multi-GPU safe)
+        - Uses shared memory for large results to avoid MemoryError from pickling
     """
+    from multiprocessing import shared_memory
+    
     num_devices = len(device_list)
     total_frames = frames_tensor.shape[0]
+    input_h, input_w = frames_tensor.shape[1], frames_tensor.shape[2]
+    
+    # Calculate output resolution (upscaled)
+    # Resolution is the target short-side, so we need to compute the scale factor
+    short_side = min(input_h, input_w)
+    scale_factor = args.resolution / short_side
+    output_h = int(input_h * scale_factor)
+    output_w = int(input_w * scale_factor)
+    
+    # Ensure dimensions are multiples of 32 (model requirement)
+    output_h = ((output_h + 31) // 32) * 32
+    output_w = ((output_w + 31) // 32) * 32
     
     # Create overlapping chunks (for multi GPU); ensures every chunk is 
     # a multiple of batch_size (except last one) to avoid blending issues
@@ -931,36 +981,101 @@ def _gpu_processing(
     else:
         chunks = torch.chunk(frames_tensor, num_devices, dim=0)
 
-    # Use direct Queue with explicit unlimited size for large video chunks
-    return_queue = mp.Queue(maxsize=0)  # 0 = unlimited (explicit)
+    # Use direct Queue with explicit unlimited size (only for small metadata now)
+    return_queue = mp.Queue(maxsize=0)
     workers = []
+    shared_memories = []
 
     # Convert args namespace to dict for serialization
     shared_args = vars(args).copy()
+
+    # Allocate shared memory for each worker's output
+    # Estimate max output frames per chunk (input frames, since temporal compression shouldn't happen)
+    # Add buffer for potential batch padding
+    for idx, chunk_tensor in enumerate(chunks):
+        max_output_frames = chunk_tensor.shape[0] + args.batch_size  # Buffer for padding
+        # Shape: [frames, height, width, channels], dtype: float32
+        shm_shape = (max_output_frames, output_h, output_w, 3)
+        shm_size = int(np.prod(shm_shape) * np.dtype(np.float32).itemsize)
+        
+        try:
+            shm = shared_memory.SharedMemory(create=True, size=shm_size)
+            shared_memories.append({
+                'shm': shm,
+                'name': shm.name,
+                'shape': shm_shape,
+                'dtype': 'float32'
+            })
+            debug.log(f"Allocated shared memory for worker {idx}: {shm_size / (1024**3):.2f} GB", category="memory")
+        except Exception as e:
+            debug.log(f"Failed to allocate shared memory for worker {idx}: {e}", level="WARNING", category="memory", force=True)
+            shared_memories.append(None)
 
     # Start all workers
     for idx, (device_id, chunk_tensor) in enumerate(zip(device_list, chunks)):
         # Set CUDA_VISIBLE_DEVICES before spawning so child inherits it
         os.environ["CUDA_VISIBLE_DEVICES"] = device_id
         
+        shm_info = shared_memories[idx] if idx < len(shared_memories) else None
+        
         p = mp.Process(
             target=_worker_process,
-            args=(idx, device_id, chunk_tensor.cpu().numpy(), shared_args, return_queue),
+            args=(
+                idx, 
+                device_id, 
+                chunk_tensor.cpu().numpy(), 
+                shared_args, 
+                return_queue,
+                shm_info['name'] if shm_info else None,
+                shm_info['shape'] if shm_info else None,
+                shm_info['dtype'] if shm_info else None
+            ),
         )
         p.start()
         workers.append(p)
 
     # Collect results before joining to prevent deadlock
     results_np = [None] * num_devices
+    results_shapes = [None] * num_devices
     collected = 0
     while collected < num_devices:
-        proc_idx, res_np = return_queue.get()
-        results_np[proc_idx] = res_np
+        result = return_queue.get()
+        if len(result) == 3:
+            # Shared memory path: (proc_idx, actual_frames, shape)
+            proc_idx, actual_frames, shape = result
+            results_shapes[proc_idx] = (actual_frames, shape)
+        else:
+            # Fallback path: (proc_idx, numpy_array)
+            proc_idx, res_np = result
+            results_np[proc_idx] = res_np
         collected += 1
     
     # Now safe to join
     for p in workers:
         p.join()
+    
+    # Read results from shared memory
+    for idx in range(num_devices):
+        if results_np[idx] is None and results_shapes[idx] is not None:
+            actual_frames, shape = results_shapes[idx]
+            shm_info = shared_memories[idx]
+            if shm_info:
+                try:
+                    shm_array = np.ndarray(shm_info['shape'], dtype=np.float32, buffer=shm_info['shm'].buf)
+                    # Copy only the actual frames (not the full buffer)
+                    results_np[idx] = shm_array[:actual_frames].copy()
+                except Exception as e:
+                    debug.log(f"Failed to read shared memory for worker {idx}: {e}", level="ERROR", category="memory", force=True)
+                    raise
+    
+    # Clean up shared memory
+    for shm_info in shared_memories:
+        if shm_info:
+            try:
+                shm_info['shm'].close()
+                shm_info['shm'].unlink()
+            except Exception:
+                pass  # Ignore cleanup errors
 
     # Concatenate results with overlap blending using shared function
     if args.temporal_overlap > 0 and num_devices > 1:        
