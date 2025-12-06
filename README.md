@@ -36,6 +36,10 @@ We're actively working on improvements and new features. To stay informed:
 
 ## 🚀 Updates
 
+**2025.12.05 - Version 2.5.17**
+
+- **🔧 Fix: Older GPU compatibility (GTX 970, etc.)** - Runtime bf16 CUBLAS probe replaces compute capability heuristics, correctly detecting unsupported GPUs without affecting RTX 20XX
+
 **2025.12.05 - Version 2.5.16**
 
 - **🔧 Fix: Older GPU compatibility (GTX 970, etc.)** - Automatic fallback for GPUs without bfloat16 support

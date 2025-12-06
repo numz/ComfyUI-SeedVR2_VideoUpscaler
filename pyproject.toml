@@ -1,7 +1,7 @@
 [project]
 name = "seedvr2_videoupscaler"
 description = "SeedVR2 official ComfyUI integration: ByteDance-Seed's one-step diffusion-based video/image upscaling with memory-efficient inference"
-version = "2.5.16"
+version = "2.5.17"
 authors = [
     {name = "numz"},
     {name = "adrientoupet"}

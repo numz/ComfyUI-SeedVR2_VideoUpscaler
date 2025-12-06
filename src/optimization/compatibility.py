@@ -41,39 +41,6 @@ import types
 import os
 
 
-# Automatic bfloat16 SDPA fallback for GPUs that don't support it (e.g., GTX 970)
-_BFLOAT16_SDPA_WORKS = None  # None=untested, True=works, False=needs float16 fallback
-_ORIGINAL_SDPA = torch.nn.functional.scaled_dot_product_attention
-
-def _safe_scaled_dot_product_attention(query, key, value, *args, **kwargs):
-    """SDPA wrapper with automatic bfloat16 -> float16 fallback for old GPUs."""
-    global _BFLOAT16_SDPA_WORKS
-    
-    original_dtype = query.dtype
-    
-    # Fast path: already know bfloat16 fails on this GPU
-    if original_dtype == torch.bfloat16 and _BFLOAT16_SDPA_WORKS is False:
-        out = _ORIGINAL_SDPA(query.half(), key.half(), value.half(), *args, **kwargs)
-        return out.to(original_dtype)
-    
-    try:
-        out = _ORIGINAL_SDPA(query, key, value, *args, **kwargs)
-        if _BFLOAT16_SDPA_WORKS is None and original_dtype == torch.bfloat16:
-            _BFLOAT16_SDPA_WORKS = True
-        return out
-    except RuntimeError as e:
-        if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e) and original_dtype == torch.bfloat16:
-            _BFLOAT16_SDPA_WORKS = False
-            print("⚠️ [SeedVR2] GPU does not support bfloat16 SDPA, using float16 fallback. "
-                  "Tiling artifacts or black frames may occur.")
-            out = _ORIGINAL_SDPA(query.half(), key.half(), value.half(), *args, **kwargs)
-            return out.to(original_dtype)
-        raise
-
-# Apply SDPA patch at module load
-torch.nn.functional.scaled_dot_product_attention = _safe_scaled_dot_product_attention
-
-
 # Flash Attention & Triton Compatibility Layer
 # 1. Flash Attention - speedup for attention operations
 try:
@@ -234,6 +201,24 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
         torch_ver = torch.__version__.split('+')[0]
         cudnn_ver = torch.backends.cudnn.version()
         print(f"🔧 Conv3d workaround active: PyTorch {torch_ver}, cuDNN {cudnn_ver} (fixing VAE 3x memory bug)")
+
+
+# Bfloat16 CUBLAS support
+def _probe_bfloat16_support() -> bool:
+    if not torch.cuda.is_available():
+        return True
+    try:
+        a = torch.randn(8, 8, dtype=torch.bfloat16, device='cuda:0')
+        _ = torch.matmul(a, a)
+        del a
+        return True
+    except RuntimeError as e:
+        if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e):
+            return False
+        raise
+
+BFLOAT16_SUPPORTED = _probe_bfloat16_support()
+COMPUTE_DTYPE = torch.bfloat16 if BFLOAT16_SUPPORTED else torch.float16
 
 
 def call_rope_with_stability(method, *args, **kwargs):
