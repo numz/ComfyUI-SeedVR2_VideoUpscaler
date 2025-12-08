@@ -1215,7 +1215,10 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
                  compute_dtype = torch.float32
                  # We will handle TF32 setting globally elsewhere or here if needed
 
-            debug.log(f"Applying {attention_mode} attention mode and {compute_dtype} compute dtype to model", category="setup")
+            # Log final decision prominently
+            mode_desc = _describe_attention_mode(attention_mode)
+            debug.log(f"Using Attention Mode: {mode_desc}", category="info", force=True)
+            debug.log(f"Using Compute Dtype: {compute_dtype}", category="info", force=True)
             
             # Get the actual model (unwrap if needed)
             actual_model = model.dit_model if hasattr(model, 'dit_model') else model

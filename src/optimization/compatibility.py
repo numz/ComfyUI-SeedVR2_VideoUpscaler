@@ -97,28 +97,16 @@ def validate_flash_attention_availability(requested_mode: str, debug=None) -> st
 
     if requested_mode in ['sd2', 'sd3']:
         if not SAGE_ATTN_AVAILABLE:
-            error_msg = (
-                f"Cannot use '{requested_mode}' attention mode: SageAttention is not installed.\n"
-                f"\n"
-                f"SageAttention provides speedup on some hardware.\n"
-                f"Falling back to PyTorch SDPA (scaled dot-product attention).\n"
-                f"\n"
-                f"To fix this issue:\n"
-                f"  1. Install SageAttention: pip install sageattention\n"
-                f"  2. OR change attention_mode to 'sdpa' (default, always available)\n"
-            )
             if debug:
-                 debug.log(error_msg, level="WARNING", category="setup", force=True)
-            return 'sdpa'
+                 debug.log(f"SageAttention not installed. Falling back from '{requested_mode}' to Flash Attention 2...", level="WARNING", category="setup", force=True)
+            # Fallback to check FA2
+            return validate_flash_attention_availability('flash_attn', debug)
+
         elif not SAGE_ATTN_VARLEN_AVAILABLE:
-             error_msg = (
-                f"Cannot use '{requested_mode}' attention mode: sageattn_varlen not found.\n"
-                f"Your SageAttention installation might be incomplete or an incompatible version.\n"
-                f"Falling back to PyTorch SDPA."
-             )
              if debug:
-                 debug.log(error_msg, level="WARNING", category="setup", force=True)
-             return 'sdpa'
+                 debug.log(f"SageAttention installed but 'sageattn_varlen' not found. Falling back from '{requested_mode}' to Flash Attention 2...", level="WARNING", category="setup", force=True)
+             # Fallback to check FA2
+             return validate_flash_attention_availability('flash_attn', debug)
 
         # If the user explicitly requested sd3, we warn if it might be an older version,
         # but we allow it because version checking can be brittle.
