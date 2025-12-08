@@ -55,8 +55,15 @@ except ImportError:
 try:
     import sageattention
     SAGE_ATTN_AVAILABLE = True
+    try:
+        from sageattention import sageattn_varlen
+        # Basic check to see if it's functional or mock
+        SAGE_ATTN_VARLEN_AVAILABLE = True
+    except ImportError:
+        SAGE_ATTN_VARLEN_AVAILABLE = False
 except ImportError:
     SAGE_ATTN_AVAILABLE = False
+    SAGE_ATTN_VARLEN_AVAILABLE = False
 
 
 def validate_flash_attention_availability(requested_mode: str, debug=None) -> str:
@@ -88,20 +95,35 @@ def validate_flash_attention_availability(requested_mode: str, debug=None) -> st
         
         return 'sdpa'
 
-    if requested_mode in ['sd2', 'sd3'] and not SAGE_ATTN_AVAILABLE:
-        error_msg = (
-            f"Cannot use '{requested_mode}' attention mode: SageAttention is not installed.\n"
-            f"\n"
-            f"SageAttention provides speedup on some hardware.\n"
-            f"Falling back to PyTorch SDPA (scaled dot-product attention).\n"
-            f"\n"
-            f"To fix this issue:\n"
-            f"  1. Install SageAttention: pip install sageattention\n"
-            f"  2. OR change attention_mode to 'sdpa' (default, always available)\n"
-        )
-        if debug:
-             debug.log(error_msg, level="WARNING", category="setup", force=True)
-        return 'sdpa'
+    if requested_mode in ['sd2', 'sd3']:
+        if not SAGE_ATTN_AVAILABLE:
+            error_msg = (
+                f"Cannot use '{requested_mode}' attention mode: SageAttention is not installed.\n"
+                f"\n"
+                f"SageAttention provides speedup on some hardware.\n"
+                f"Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+                f"\n"
+                f"To fix this issue:\n"
+                f"  1. Install SageAttention: pip install sageattention\n"
+                f"  2. OR change attention_mode to 'sdpa' (default, always available)\n"
+            )
+            if debug:
+                 debug.log(error_msg, level="WARNING", category="setup", force=True)
+            return 'sdpa'
+        elif not SAGE_ATTN_VARLEN_AVAILABLE:
+             error_msg = (
+                f"Cannot use '{requested_mode}' attention mode: sageattn_varlen not found.\n"
+                f"Your SageAttention installation might be incomplete or an incompatible version.\n"
+                f"Falling back to PyTorch SDPA."
+             )
+             if debug:
+                 debug.log(error_msg, level="WARNING", category="setup", force=True)
+             return 'sdpa'
+
+        # Version check for sd3?
+        # Ideally we would check sageattention.__version__ but it might not be reliable
+        # For now, if varlen is available, we assume compatibility or let it fail gracefully
+        pass
     
     return requested_mode
 

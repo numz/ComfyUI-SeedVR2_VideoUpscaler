@@ -134,6 +134,10 @@ def _call_sage_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_
 
     # Calling sageattn_varlen
     # Signature assumptions: q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale
+    if not hasattr(_call_sage_attn_varlen_func, "_logged"):
+        print(f"🚀 Executing SageAttention ({implementation}) kernel for the first time")
+        _call_sage_attn_varlen_func._logged = True
+
     return sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale)
 
 
