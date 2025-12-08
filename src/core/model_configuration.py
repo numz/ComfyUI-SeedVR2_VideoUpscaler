@@ -73,7 +73,8 @@ from ..optimization.compatibility import (
     FP8CompatibleDiT,
     TRITON_AVAILABLE,
     validate_flash_attention_availability,
-    detect_high_end_system
+    detect_high_end_system,
+    log_system_capabilities
 )
 from ..optimization.blockswap import is_blockswap_enabled, apply_block_swap_to_dit, cleanup_blockswap
 from ..optimization.memory_manager import cleanup_dit, cleanup_vae
@@ -796,6 +797,9 @@ def configure_runner(
     if debug is None:
         raise ValueError("Debug instance must be provided to configure_runner")
     
+    # Log installed attention backends and versions
+    log_system_capabilities(debug)
+
     # Phase 1: Initialize cache and get cached models
     cache_context = _initialize_cache_context(
         dit_cache, vae_cache, dit_id, vae_id, 

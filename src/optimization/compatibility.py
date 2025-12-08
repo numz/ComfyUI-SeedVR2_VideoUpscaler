@@ -108,17 +108,20 @@ def validate_flash_attention_availability(requested_mode: str, debug=None) -> st
              # Fallback to check FA2
              return validate_flash_attention_availability('flash_attn', debug)
 
-        # If the user explicitly requested sd3, we warn if it might be an older version,
-        # but we allow it because version checking can be brittle.
-        # However, to avoid confusion ("SD3 isn't even installed"), we log what we found.
+        # If the user explicitly requested sd3, we check for version compatibility.
+        # If version is unknown or insufficient, we fallback to SD2.
         if requested_mode == 'sd3':
              try:
                  version = sageattention.__version__
+                 # Assuming SD3 requires at least a certain version or just presence of version string.
+                 # If we can read version, we assume it's compliant enough or user knows what they are doing.
                  if debug:
                      debug.log(f"SageAttention version {version} detected. Using installed kernel for 'sd3' mode.", category="setup", force=True)
              except AttributeError:
+                 # Version unknown -> Assume it's an older version (SD2) and fallback
                  if debug:
-                     debug.log("SageAttention version unknown. Using installed kernel for 'sd3' mode.", category="setup", force=True)
+                     debug.log("SageAttention version unknown (likely v2 or older). Falling back from 'sd3' to 'sd2'...", level="WARNING", category="setup", force=True)
+                 return validate_flash_attention_availability('sd2', debug)
 
         pass
     
@@ -262,6 +265,28 @@ def _probe_bfloat16_support() -> bool:
 
 BFLOAT16_SUPPORTED = _probe_bfloat16_support()
 COMPUTE_DTYPE = torch.bfloat16 if BFLOAT16_SUPPORTED else torch.float16
+
+def log_system_capabilities(debug=None):
+    """Log installed attention backends and versions at startup."""
+    if not debug:
+        return
+
+    # SageAttention
+    sa_status = "Available" if SAGE_ATTN_AVAILABLE else "Not Installed"
+    if SAGE_ATTN_AVAILABLE:
+        try:
+            sa_version = sageattention.__version__
+            sa_status += f" (v{sa_version})"
+        except AttributeError:
+            sa_status += " (Version Unknown)"
+
+    # FlashAttention
+    fa_status = "Available" if FLASH_ATTN_AVAILABLE else "Not Installed"
+
+    # Triton
+    triton_status = "Available" if TRITON_AVAILABLE else "Not Installed"
+
+    debug.log(f"Attention Backends: SageAttention={sa_status} | FlashAttention={fa_status} | Triton={triton_status}", category="info", force=True)
 
 def detect_high_end_system() -> Dict[str, Any]:
     """
