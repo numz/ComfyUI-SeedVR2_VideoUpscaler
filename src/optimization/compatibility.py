@@ -39,6 +39,7 @@ ensure_triton_compat()
 import torch
 import types
 import os
+from typing import Dict, Any, Optional
 
 
 # Flash Attention & Triton Compatibility Layer
