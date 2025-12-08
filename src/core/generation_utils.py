@@ -436,6 +436,7 @@ def prepare_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
+    precision: str = 'auto',
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
     torch_compile_args_vae: Optional[Dict[str, Any]] = None
 ) -> Tuple['VideoDiffusionInfer', Dict[str, Any]]:
@@ -506,6 +507,7 @@ def prepare_runner(
         decode_tile_overlap=decode_tile_overlap,
         tile_debug=tile_debug,
         attention_mode=attention_mode,
+        precision=precision,
         torch_compile_args_dit=torch_compile_args_dit,
         torch_compile_args_vae=torch_compile_args_vae
     )
