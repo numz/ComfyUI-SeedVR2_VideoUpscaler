@@ -120,9 +120,18 @@ def validate_flash_attention_availability(requested_mode: str, debug=None) -> st
                  debug.log(error_msg, level="WARNING", category="setup", force=True)
              return 'sdpa'
 
-        # Version check for sd3?
-        # Ideally we would check sageattention.__version__ but it might not be reliable
-        # For now, if varlen is available, we assume compatibility or let it fail gracefully
+        # If the user explicitly requested sd3, we warn if it might be an older version,
+        # but we allow it because version checking can be brittle.
+        # However, to avoid confusion ("SD3 isn't even installed"), we log what we found.
+        if requested_mode == 'sd3':
+             try:
+                 version = sageattention.__version__
+                 if debug:
+                     debug.log(f"SageAttention version {version} detected. Using installed kernel for 'sd3' mode.", category="setup", force=True)
+             except AttributeError:
+                 if debug:
+                     debug.log("SageAttention version unknown. Using installed kernel for 'sd3' mode.", category="setup", force=True)
+
         pass
     
     return requested_mode
@@ -509,6 +518,12 @@ class FP8CompatibleDiT(torch.nn.Module):
     
     def _is_attention_layer(self, name: str, module: torch.nn.Module) -> bool:
         """Identify if a module is an attention layer"""
+        module_type_name = type(module).__name__
+
+        # Skip FlashAttentionVarlen modules - they manage their own attention backends
+        if module_type_name == 'FlashAttentionVarlen':
+            return False
+
         attention_keywords = [
             'attention', 'attn', 'self_attn', 'cross_attn', 'mhattn', 'multihead',
             'transformer_block', 'dit_block'
@@ -519,7 +534,7 @@ class FP8CompatibleDiT(torch.nn.Module):
             return True
         
         # Check by module type
-        module_type = type(module).__name__.lower()
+        module_type = module_type_name.lower()
         if any(keyword in module_type for keyword in attention_keywords):
             return True
         
