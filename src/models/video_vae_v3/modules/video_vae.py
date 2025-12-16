@@ -352,18 +352,15 @@ class DownEncoderBlock3D(nn.Module):
 
         self.resnets = nn.ModuleList(resnets)
 
-        self.downsamplers = None
+        self.downsamplers = nn.ModuleList()
         if add_downsample:
-            # Todo: Refactor this line before V5 Image VAE Training.
-            self.downsamplers = nn.ModuleList(
-                [
-                    Downsample3D(
-                        channels=out_channels,
-                        inflation_mode=inflation_mode,
-                        temporal_down=temporal_down,
-                        spatial_down=spatial_down,
-                    )
-                ]
+            self.downsamplers.append(
+                Downsample3D(
+                    channels=out_channels,
+                    inflation_mode=inflation_mode,
+                    temporal_down=temporal_down,
+                    spatial_down=spatial_down,
+                )
             )
 
     def forward(
@@ -372,9 +369,8 @@ class DownEncoderBlock3D(nn.Module):
         for resnet in self.resnets:
             hidden_states = resnet(hidden_states, memory_state=memory_state)
 
-        if self.downsamplers is not None:
-            for downsampler in self.downsamplers:
-                hidden_states = downsampler(hidden_states, memory_state=memory_state)
+        for downsampler in self.downsamplers:
+            hidden_states = downsampler(hidden_states, memory_state=memory_state)
 
         return hidden_states
 
@@ -411,19 +407,16 @@ class UpDecoderBlock3D(nn.Module):
 
         self.resnets = nn.ModuleList(resnets)
 
-        self.upsamplers = None
-        # Todo: Refactor this line before V5 Image VAE Training.
+        self.upsamplers = nn.ModuleList()
         if add_upsample:
-            self.upsamplers = nn.ModuleList(
-                [
-                    Upsample3D(
-                        channels=out_channels,
-                        inflation_mode=inflation_mode,
-                        temporal_up=temporal_up,
-                        spatial_up=spatial_up,
-                        slicing=slicing,
-                    )
-                ]
+            self.upsamplers.append(
+                Upsample3D(
+                    channels=out_channels,
+                    inflation_mode=inflation_mode,
+                    temporal_up=temporal_up,
+                    spatial_up=spatial_up,
+                    slicing=slicing,
+                )
             )
 
     def forward(
@@ -432,9 +425,8 @@ class UpDecoderBlock3D(nn.Module):
         for resnet in self.resnets:
             hidden_states = resnet(hidden_states, memory_state=memory_state)
 
-        if self.upsamplers is not None:
-            for upsampler in self.upsamplers:
-                hidden_states = upsampler(hidden_states, memory_state=memory_state)
+        for upsampler in self.upsamplers:
+            hidden_states = upsampler(hidden_states, memory_state=memory_state)
 
         return hidden_states
 
