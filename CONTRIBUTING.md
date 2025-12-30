@@ -16,15 +16,9 @@ We welcome code contributions from the community. Here's how to propose changes:
 1. Fork this repository to your own GitHub account.
 2. Create a new branch on your fork for your changes.
 3. Make your changes in this branch.
-4. When you are ready, submit a pull request to either:
-   - **`main` branch** - For stable features and bug fixes
-   - **`nightly` branch** - For experimental features or if you want faster integration (note: this branch changes more frequently and may be less stable)
+4. When you are ready, submit a pull request to the **`main`** branch.
 
-### Branch Guidelines
-- **Main Branch**: Use this for production-ready changes, critical bug fixes, and well-tested features
-- **Nightly Branch**: Use this for experimental features, cutting-edge improvements, or if you need your changes integrated quickly. Be aware that this branch is actively under development and may contain unstable features.
-
-We use the GitHub Flow workflow. Choose the appropriate target branch based on the nature of your contribution.
+We use the GitHub Flow workflow.
 
 Before submitting a pull request, please make sure your code adheres to the project's coding conventions and it has passed all tests. If you are adding features, please also add appropriate tests.
 

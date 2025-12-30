@@ -1,15 +1,14 @@
 [project]
 name = "seedvr2_videoupscaler"
 description = "SeedVR2 official ComfyUI integration: ByteDance-Seed's one-step diffusion-based video/image upscaling with memory-efficient inference"
-version = "2.5.10"
+version = "2.5.24"
 authors = [
     {name = "numz"},
     {name = "adrientoupet"}
 ]
 license = {file = "LICENSE"} 
 classifiers = [
-     "Operating System :: OS Independent",
-     "Environment :: GPU :: NVIDIA CUDA"
+     "Operating System :: OS Independent"
 ]
 dependencies = [
     "torch",

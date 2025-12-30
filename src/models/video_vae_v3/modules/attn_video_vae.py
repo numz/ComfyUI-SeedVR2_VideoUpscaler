@@ -1093,7 +1093,7 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
     ):
         extra_cond_dim = kwargs.pop("extra_cond_dim") if "extra_cond_dim" in kwargs else None
         self.slicing_sample_min_size = slicing_sample_min_size
-        self.slicing_latent_min_size = slicing_sample_min_size // (2**temporal_scale_num)
+        self.slicing_latent_min_size = max(1, slicing_sample_min_size // (2**temporal_scale_num))
 
         super().__init__(
             in_channels=in_channels,
@@ -1224,6 +1224,10 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         
         output = causal_conv_gather_outputs(output)
         
+        # MPS memory leak workaround (pytorch/pytorch#155060)
+        if self.device.type == 'mps':
+            torch.mps.empty_cache()
+        
         # Only transfer back if needed
         return output if output.device == x.device else output.to(x.device)
 
@@ -1239,6 +1243,10 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         
         output = self.decoder(_z, memory_state=memory_state)
         output = causal_conv_gather_outputs(output)
+        
+        # MPS memory leak workaround (pytorch/pytorch#155060)
+        if self.device.type == 'mps':
+            torch.mps.empty_cache()
         
         # Only transfer back if needed
         return output if output.device == z.device else output.to(z.device)
@@ -1710,7 +1718,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         if split_size is not None:
             self.enable_slicing()
             self.slicing_sample_min_size = split_size
-            self.slicing_latent_min_size = split_size // self.temporal_downsample_factor
+            self.slicing_latent_min_size = max(1, split_size // self.temporal_downsample_factor)
         else:
             self.disable_slicing()
         for module in self.modules():

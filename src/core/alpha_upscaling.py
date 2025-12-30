@@ -337,13 +337,23 @@ def edge_guided_alpha_upscale(
     rgb_edges = detect_edges_batch(images=rgb_normalized, method='sobel', debug=debug)
     
     # Step 1: Initial bicubic upscale provides smooth base before edge refinement
-    alpha_upscaled = F.interpolate(
-        input_alpha,
-        size=(H_out, W_out),
-        mode='bicubic',
-        align_corners=False,
-        antialias=True
-    ).clamp(0, 1)
+    # MPS on PyTorch < 2.8 doesn't support bicubic+antialias - use CPU fallback
+    try:
+        alpha_upscaled = F.interpolate(
+            input_alpha,
+            size=(H_out, W_out),
+            mode='bicubic',
+            align_corners=False,
+            antialias=True
+        ).clamp(0, 1)
+    except NotImplementedError:
+        alpha_upscaled = F.interpolate(
+            input_alpha.cpu(),
+            size=(H_out, W_out),
+            mode='bicubic',
+            align_corners=False,
+            antialias=True
+        ).to(device).clamp(0, 1)
     
     if is_binary_mask:
         if debug:

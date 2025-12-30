@@ -70,11 +70,11 @@ from .model_cache import get_global_cache
 from ..common.config import load_config
 from ..models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
 from ..optimization.compatibility import (
-    FP8CompatibleDiT,
+    CompatibleDiT,
     TRITON_AVAILABLE,
-    validate_flash_attention_availability
+    validate_attention_mode
 )
-from ..optimization.blockswap import is_blockswap_enabled, apply_block_swap_to_dit, cleanup_blockswap
+from ..optimization.blockswap import is_blockswap_enabled, validate_blockswap_config, apply_block_swap_to_dit, cleanup_blockswap
 from ..optimization.memory_manager import cleanup_dit, cleanup_vae
 from ..utils.constants import find_model_file
 
@@ -171,7 +171,7 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     Generate human-readable description of attention mode configuration.
     
     Args:
-        attention_mode: Attention mode string ('sdpa' or 'flash_attn')
+        attention_mode: Attention mode string ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         
     Returns:
         Human-readable description string
@@ -181,7 +181,10 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     
     mode_descriptions = {
         'sdpa': 'PyTorch SDPA',
-        'flash_attn': 'Flash Attention 2'
+        'flash_attn_2': 'Flash Attention 2',
+        'flash_attn_3': 'Flash Attention 3',
+        'sageattn_2': 'SageAttention 2',
+        'sageattn_3': 'SageAttention 3 (Blackwell)'
     }
     
     return mode_descriptions.get(attention_mode, attention_mode)
@@ -436,7 +439,7 @@ def _update_dit_config(
             - dynamic: bool - Enable dynamic shapes
             - dynamo_cache_size_limit: int - Cache size limit
             - dynamo_recompile_limit: int - Recompilation limit
-        attention_mode: Attention computation backend ('sdpa' or 'flash_attn')
+        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         debug: Debug instance for logging
         
     Returns:
@@ -771,7 +774,7 @@ def configure_runner(
         decode_tile_size: Tile size for decoding (height, width)
         decode_tile_overlap: Tile overlap for decoding (height, width)
         tile_debug: Tile visualization mode (false/encode/decode)
-        attention_mode: Attention computation backend ('sdpa' or 'flash_attn')
+        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: Optional torch.compile configuration for DiT model
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
         
@@ -791,6 +794,14 @@ def configure_runner(
     
     if debug is None:
         raise ValueError("Debug instance must be provided to configure_runner")
+    
+    # Validate BlockSwap configuration early (before any model loading)
+    block_swap_config = validate_blockswap_config(
+        block_swap_config=block_swap_config,
+        dit_device=ctx['dit_device'],
+        dit_offload_device=ctx.get('dit_offload_device'),
+        debug=debug
+    )
     
     # Phase 1: Initialize cache and get cached models
     cache_context = _initialize_cache_context(
@@ -857,7 +868,7 @@ def _configure_runner_settings(
         decode_tile_size: Tile dimensions (height, width) for decoding in pixels
         decode_tile_overlap: Overlap dimensions (height, width) between decoding tiles
         tile_debug: Tile visualization mode (false/encode/decode)
-        attention_mode: Attention computation backend ('sdpa' or 'flash_attn')
+        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: torch.compile configuration for DiT model or None
         torch_compile_args_vae: torch.compile configuration for VAE model or None
         block_swap_config: BlockSwap configuration for DiT model or None
@@ -1165,23 +1176,23 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
     """
     if is_dit:
         # DiT-specific
-        # Apply FP8 compatibility wrapper with compute_dtype
-        if not isinstance(model, FP8CompatibleDiT):
-            debug.log("Applying FP8/RoPE compatibility wrapper to DiT model", category="setup")
-            debug.start_timer("FP8CompatibleDiT")
+        # Apply compatibility wrapper with compute_dtype
+        if not isinstance(model, CompatibleDiT):
+            debug.log("Applying DiT compatibility wrapper", category="setup")
+            debug.start_timer("CompatibleDiT")
             # Get compute_dtype from runner if available, fallback to bfloat16
             compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
-            model = FP8CompatibleDiT(model, debug, compute_dtype=compute_dtype, skip_conversion=False)
-            debug.end_timer("FP8CompatibleDiT", "FP8/RoPE compatibility wrapper application")
+            model = CompatibleDiT(model, debug, compute_dtype=compute_dtype, skip_conversion=False)
+            debug.end_timer("CompatibleDiT", "Compatibility wrapper application")
         else:
-            debug.log("Reusing existing FP8/RoPE compatibility wrapper", category="reuse")
+            debug.log("Reusing existing DiT compatibility wrapper", category="reuse")
         
         # Apply attention mode and compute_dtype to all FlashAttentionVarlen modules
         if hasattr(runner, '_dit_attention_mode'):
             requested_attention_mode = runner._dit_attention_mode or 'sdpa'
             
             # Validate and get final attention_mode (with warning if fallback needed)
-            attention_mode = validate_flash_attention_availability(requested_attention_mode, debug)
+            attention_mode = validate_attention_mode(requested_attention_mode, debug)
             
             # Get compute_dtype from runner
             compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)            

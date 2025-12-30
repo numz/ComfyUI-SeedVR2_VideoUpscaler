@@ -36,7 +36,7 @@ class UniformTrailingSamplingTimesteps(SamplingTimesteps):
         dtype: torch.dtype = torch.float32,
     ):
         # Create trailing timesteps with specified dtype
-        timesteps = torch.arange(1.0, 0.0, -1.0 / steps, device=device, dtype=dtype)
+        timesteps = torch.arange(1.0, 0.0, -1.0 / steps, device='cpu').to(device=device, dtype=dtype)
 
         # Shift timesteps.
         timesteps = shift * timesteps / (1 + (shift - 1) * timesteps)

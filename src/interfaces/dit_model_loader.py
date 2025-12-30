@@ -66,7 +66,8 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                         "• 3B model: 0-32 blocks\n"
                         "• 7B model: 0-36 blocks\n"
                         "\n"
-                        "Requires offload_device to be set and different from device."
+                        "Requires offload_device to be set and different from device.\n"
+                        "Not available on macOS (unified memory architecture)."
                     )
                 ),
                 io.Boolean.Input("swap_io_components",
@@ -74,7 +75,8 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                     optional=True,
                     tooltip=(
                         "Offload input/output embeddings and normalization layers to reduce VRAM.\n"
-                        "Requires offload_device to be set and different from device."
+                        "Requires offload_device to be set and different from device.\n"
+                        "Not available on macOS (unified memory architecture)."
                     )
                 ),
                 io.Combo.Input("offload_device",
@@ -100,16 +102,19 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                     )
                 ),
                 io.Combo.Input("attention_mode",
-                    options=["sdpa", "flash_attn"],
+                    options=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
                     default="sdpa",
                     optional=True,
                     tooltip=(
                         "Attention computation backend:\n"
                         "• sdpa: PyTorch scaled_dot_product_attention (default, stable, always available)\n"
-                        "• flash_attn: Flash Attention 2 (faster on supported hardware, requires flash-attn package)\n"
+                        "• flash_attn_2: Flash Attention 2 (Ampere+, requires flash-attn package)\n"
+                        "• flash_attn_3: Flash Attention 3 (Hopper+, requires flash-attn with FA3 support)\n"
+                        "• sageattn_2: SageAttention 2 (requires sageattention package)\n"
+                        "• sageattn_3: SageAttention 3 (Blackwell/RTX 50xx only, requires sageattn3 package)\n"
                         "\n"
                         "SDPA is recommended - stable and works everywhere.\n"
-                        "Flash Attention provides speedup through optimized CUDA kernels on compatible GPUs."
+                        "Flash Attention and SageAttention provide speedup through optimized CUDA kernels on compatible GPUs."
                     )
                 ),
                 io.Custom("TORCH_COMPILE_ARGS").Input("torch_compile_args",
@@ -142,23 +147,15 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
             cache_model: Whether to keep model loaded between runs
             blocks_to_swap: Number of transformer blocks to swap (requires offload_device != device)
             swap_io_components: Whether to offload I/O components (requires offload_device != device)
-            attention_mode: Attention computation backend ('sdpa' or 'flash_attn')
+            attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
             torch_compile_args: Optional torch.compile configuration from settings node
             
         Returns:
             NodeOutput containing configuration dictionary for SeedVR2 main node
             
         Raises:
-            ValueError: If BlockSwap is enabled but offload_device is invalid
+            ValueError: If cache_model is enabled but offload_device is not set
         """
-        # Validate BlockSwap configuration
-        if (blocks_to_swap > 0 or swap_io_components) and (offload_device == "none" or offload_device == device):
-            raise ValueError(
-                "BlockSwap requires offload_device to be set and different from device. "
-                f"Current: device='{device}', offload_device='{offload_device}'. "
-                "Please set offload_device to a different device (e.g., 'cpu' or another GPU)."
-            )
-        
         # Validate cache_model configuration
         if cache_model and offload_device == "none":
             raise ValueError(

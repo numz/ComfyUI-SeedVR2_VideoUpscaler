@@ -9,6 +9,40 @@ import torch
 from typing import List
 
 
+def optimized_channels_to_last(tensor):
+    """🚀 Optimized replacement for rearrange(tensor, 'b c ... -> b ... c')
+    Moves channels from position 1 to last position using PyTorch native operations.
+    """
+    if tensor.ndim == 3:  # [batch, channels, spatial]
+        return tensor.permute(0, 2, 1)
+    elif tensor.ndim == 4:  # [batch, channels, height, width]
+        return tensor.permute(0, 2, 3, 1)
+    elif tensor.ndim == 5:  # [batch, channels, depth, height, width]
+        return tensor.permute(0, 2, 3, 4, 1)
+    else:
+        # Fallback for other dimensions - move channel (dim=1) to last
+        dims = list(range(tensor.ndim))
+        dims = [dims[0]] + dims[2:] + [dims[1]]  # [0, 2, 3, ..., 1]
+        return tensor.permute(*dims)
+
+
+def optimized_channels_to_second(tensor):
+    """🚀 Optimized replacement for rearrange(tensor, 'b ... c -> b c ...')
+    Moves channels from last position to position 1 using PyTorch native operations.
+    """
+    if tensor.ndim == 3:  # [batch, spatial, channels]
+        return tensor.permute(0, 2, 1)
+    elif tensor.ndim == 4:  # [batch, height, width, channels]
+        return tensor.permute(0, 3, 1, 2)
+    elif tensor.ndim == 5:  # [batch, depth, height, width, channels]
+        return tensor.permute(0, 4, 1, 2, 3)
+    else:
+        # Fallback for other dimensions - move last dim to position 1
+        dims = list(range(tensor.ndim))
+        dims = [dims[0], dims[-1]] + dims[1:-1]  # [0, -1, 1, 2, ..., -2]
+        return tensor.permute(*dims)
+
+
 def optimized_video_rearrange(video_tensors: List[torch.Tensor]) -> List[torch.Tensor]:
     """
     🚀 OPTIMIZED version of video rearrangement
@@ -130,36 +164,6 @@ def optimized_sample_to_image_format(sample: torch.Tensor) -> torch.Tensor:
     else:  # ndim == 4
         # t c h w -> t h w c (permute channels to last)
         return sample.permute(0, 2, 3, 1)
-
-
-def temporal_latent_blending(latents1: torch.Tensor, latents2: torch.Tensor, blend_frames: int) -> torch.Tensor:
-    """
-    🎨 Temporal blending in latent space to avoid discontinuities
-    
-    Args:
-        latents1: Latents from previous batch (end frames)
-        latents2: Latents from current batch (start frames)
-        blend_frames: Number of frames to blend
-    
-    Returns:
-        Blended latents for smooth transition
-    """
-    if latents1.shape[0] != latents2.shape[0]:
-        # Adjust dimensions if necessary
-        min_frames = min(latents1.shape[0], latents2.shape[0])
-        latents1 = latents1[:min_frames]
-        latents2 = latents2[:min_frames]
-    
-    # Create linear blending weights
-    # Frame 0: 100% latents1, 0% latents2
-    # Frame n: 0% latents1, 100% latents2
-    weights1 = torch.linspace(1.0, 0.0, blend_frames).view(-1, 1, 1, 1).to(latents1.device)
-    weights2 = torch.linspace(0.0, 1.0, blend_frames).view(-1, 1, 1, 1).to(latents2.device)
-    
-    # Apply blending
-    blended_latents = weights1 * latents1 + weights2 * latents2
-    
-    return blended_latents
 
 
 

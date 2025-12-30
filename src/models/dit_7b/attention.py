@@ -15,8 +15,11 @@
 import torch
 import torch.nn.functional as F
 
-# Import flash_attn with automatic fallback from compatibility layer
-from ...optimization.compatibility import flash_attn_varlen_func, FLASH_ATTN_AVAILABLE
+# Import flash/sage attn with automatic fallback from compatibility layer
+from ...optimization.compatibility import (
+    call_flash_attn_2_varlen, call_flash_attn_3_varlen,
+    call_sage_attn_2_varlen, call_sage_attn_3_varlen
+)
 
 from torch import nn
 
@@ -61,37 +64,6 @@ def pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=N
     return torch.cat(output_splits, dim=0)
 
 
-@torch._dynamo.disable
-def _call_flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
-    """
-    Wrapper for flash_attn_varlen_func that handles tensor-to-scalar conversion.
-    
-    This function is excluded from torch.compile because:
-    1. flash_attn is a C++ extension that can't be compiled anyway
-    2. It requires Python int scalars for max_seqlen parameters
-    3. Disabling compilation here keeps the rest of the model compilable
-    """
-    if not FLASH_ATTN_AVAILABLE:
-        raise ImportError("flash_attn is not available")
-    
-    # Convert tensor max_seqlen to Python int if needed
-    if torch.is_tensor(max_seqlen_q):
-        max_seqlen_q = int(max_seqlen_q.item())
-    if torch.is_tensor(max_seqlen_k):
-        max_seqlen_k = int(max_seqlen_k.item())
-    
-    return flash_attn_varlen_func(
-        q=q,
-        k=k,
-        v=v,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        **kwargs
-    )
-
-
 class TorchAttention(nn.Module):
     def tflops(self, args, kwargs, output) -> float:
         assert len(args) == 0 or len(args) > 2, "query, key should both provided by args / kwargs"
@@ -107,12 +79,16 @@ class TorchAttention(nn.Module):
 
 class FlashAttentionVarlen(nn.Module):
     """
-    Variable-length attention with configurable backend (Flash Attention or PyTorch SDPA).
+    Variable-length attention with configurable backend.
     
-    Backend selection is validated during model configuration.
-    Compilation behavior:
-    - SDPA: Fully compilable, optimal performance
-    - Flash Attention: Uses @torch._dynamo.disable wrapper (C++ extension)
+    Supported backends:
+    - sdpa: PyTorch SDPA (fully compilable, always available)
+    - flash_attn_2: Flash Attention 2 (Ampere+)
+    - flash_attn_3: Flash Attention 3 (Hopper+)
+    - sageattn_2: SageAttention 2
+    - sageattn_3: SageAttention 3 (Blackwell/RTX 50xx)
+    
+    All non-SDPA backends use @torch._dynamo.disable wrapper (C++ extensions).
     """
 
     def __init__(self, attention_mode: str = 'sdpa', compute_dtype: torch.dtype = None):
@@ -120,7 +96,7 @@ class FlashAttentionVarlen(nn.Module):
         Initialize with specified attention backend.
         
         Args:
-            attention_mode: 'flash_attn' or 'sdpa' (validated externally by validate_flash_attention_availability)
+            attention_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3'
             compute_dtype: Compute dtype for attention (set by pipeline, defaults to None for auto-detection)
         """
         super().__init__()
@@ -144,9 +120,24 @@ class FlashAttentionVarlen(nn.Module):
             k = k.to(self.compute_dtype)
             v = v.to(self.compute_dtype)
         
-        if self.attention_mode == 'flash_attn':
-            return _call_flash_attn_varlen_func(
+        if self.attention_mode == 'flash_attn_3':
+            return call_flash_attn_3_varlen(
                 q, k, v, cu_seqlens_q, cu_seqlens_k, 
+                max_seqlen_q, max_seqlen_k, **kwargs
+            )
+        elif self.attention_mode == 'flash_attn_2':
+            return call_flash_attn_2_varlen(
+                q, k, v, cu_seqlens_q, cu_seqlens_k, 
+                max_seqlen_q, max_seqlen_k, **kwargs
+            )
+        elif self.attention_mode == 'sageattn_3':
+            return call_sage_attn_3_varlen(
+                q, k, v, cu_seqlens_q, cu_seqlens_k,
+                max_seqlen_q, max_seqlen_k, **kwargs
+            )
+        elif self.attention_mode == 'sageattn_2':
+            return call_sage_attn_2_varlen(
+                q, k, v, cu_seqlens_q, cu_seqlens_k,
                 max_seqlen_q, max_seqlen_k, **kwargs
             )
         else:

@@ -36,6 +36,7 @@ from .model_configuration import configure_runner
 from .infer import VideoDiffusionInfer
 from ..data.image.transforms.divisible_crop import DivisiblePad
 from ..data.image.transforms.na_resize import NaResize
+from ..optimization.compatibility import COMPUTE_DTYPE, BFLOAT16_SUPPORTED
 from ..optimization.memory_manager import manage_tensor
 from ..utils.constants import get_script_directory
 
@@ -349,7 +350,12 @@ def setup_generation_context(
     vae_device = _normalize_device(vae_device)
     dit_offload_device = _normalize_device(dit_offload_device) if dit_offload_device is not None else None
     vae_offload_device = _normalize_device(vae_offload_device) if vae_offload_device is not None else None
-    tensor_offload_device = _normalize_device(tensor_offload_device) if tensor_offload_device is not None else None
+    # MPS unified memory: CPU offload causes sync overhead with no memory benefit
+    is_mps = dit_device.type == 'mps' or vae_device.type == 'mps'
+    if is_mps and tensor_offload_device is not None and str(tensor_offload_device) == 'cpu':
+        tensor_offload_device = None
+    else:
+        tensor_offload_device = _normalize_device(tensor_offload_device) if tensor_offload_device is not None else None
     
     # Set LOCAL_RANK to 0 for single-GPU inference mode
     # CLI multi-GPU uses CUDA_VISIBLE_DEVICES to restrict visibility per worker
@@ -371,7 +377,7 @@ def setup_generation_context(
         'dit_offload_device': dit_offload_device,
         'vae_offload_device': vae_offload_device,
         'tensor_offload_device': tensor_offload_device,
-        'compute_dtype': torch.bfloat16, # Hardcoded - gives the best compromise between memory & quality without artifacts
+        'compute_dtype': COMPUTE_DTYPE,
         'interrupt_fn': interrupt_fn,
         'video_transform': None,
         'text_embeds': None,
@@ -401,7 +407,12 @@ def setup_generation_context(
             f"LOCAL_RANK={os.environ['LOCAL_RANK']}",
             category="setup"
         )
-        reason = "quality" if ctx['compute_dtype'] == torch.float32 else "compatibility"
+        if ctx['compute_dtype'] == torch.float32:
+            reason = "quality"
+        elif not BFLOAT16_SUPPORTED:
+            reason = "compatibility (GPU lacks bfloat16 CUBLAS - 7B models unsupported, 3B may have artifacts)"
+        else:
+            reason = "performance"
         debug.log(f"Unified compute dtype: {ctx['compute_dtype']} across entire pipeline for maximum {reason}", category="precision")
     
     return ctx
@@ -451,7 +462,7 @@ def prepare_runner(
         decode_tile_size: Tile size for decoding (height, width)
         decode_tile_overlap: Tile overlap for decoding (height, width)
         tile_debug: Tile visualization mode (false/encode/decode)
-        attention_mode: Attention computation backend ('sdpa' or 'flash_attn')
+        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: Optional torch.compile configuration for DiT model
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
         
@@ -523,8 +534,8 @@ def load_text_embeddings(script_directory: str, device: torch.device,
         - Memory-efficient embedding preparation
         - Consistent movement logging
     """
-    text_pos_embeds = torch.load(os.path.join(script_directory, 'pos_emb.pt'))
-    text_neg_embeds = torch.load(os.path.join(script_directory, 'neg_emb.pt'))
+    text_pos_embeds = torch.load(os.path.join(script_directory, 'pos_emb.pt'), weights_only=True)
+    text_neg_embeds = torch.load(os.path.join(script_directory, 'neg_emb.pt'), weights_only=True)
     
     text_pos_embeds = manage_tensor(
         tensor=text_pos_embeds,
