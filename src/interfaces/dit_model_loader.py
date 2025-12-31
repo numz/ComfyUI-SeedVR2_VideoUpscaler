@@ -29,6 +29,11 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
         devices = get_device_list()
         dit_models = get_available_dit_models()
         
+        if no devices:
+            devices = ["cpu"]
+        if no dit_models:
+            dit_models = ["default"] 
+
         return io.Schema(
             node_id="SeedVR2LoadDiTModel",
             display_name="SeedVR2 (Down)Load DiT Model",
