@@ -45,7 +45,7 @@ def get_gpu_backend() -> str:
     return 'cpu'
 
 
-def get_device_list(include_none: bool = False, include_cpu: bool = False) -> List[str]:
+def get_device_list(include_none: bool = False, include_cpu: bool = True) -> List[str]:
     """
     Get list of available compute devices for SeedVR2
     
