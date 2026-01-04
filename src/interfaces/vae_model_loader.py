@@ -30,11 +30,6 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
         devices = get_device_list()
         vae_models = get_available_vae_models()
 
-        if not devices:
-            devices = ["cpu"]
-        if not dit_models:
-            dit_models = ["default"] 
-
         return io.Schema(
             node_id="SeedVR2LoadVAEModel",
             display_name="SeedVR2 (Down)Load VAE Model",

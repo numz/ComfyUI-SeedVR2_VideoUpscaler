@@ -685,17 +685,12 @@ def _probe_bfloat16_support() -> bool:
     if not torch.cuda.is_available():
         return False
     try:
-        torch.cuda.device('cuda:0')
-    except (RuntimeError, AssertionError):
-        return False
-    try:
         a = torch.randn(8, 8, dtype=torch.bfloat16, device='cuda:0')
         _ = torch.matmul(a, a)
         del a
         return True
     except RuntimeError as e:
-        err_str = str(e).lower()
-        if any(key in err_str for key in ["cublas", "nvidia driver", "cuda", "device"]):
+        if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e):
             return False
         raise
 
