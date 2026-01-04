@@ -685,14 +685,16 @@ def _probe_bfloat16_support() -> bool:
     if not torch.cuda.is_available():
         return False
     try:
+        torch.cuda.device('cuda:0')
+    except (RuntimeError, AssertionError):
+        return False
+    try:
         a = torch.randn(8, 8, dtype=torch.bfloat16, device='cuda:0')
         _ = torch.matmul(a, a)
         del a
         return True
     except RuntimeError as e:
-        if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e):
-            return False
-        raise
+        return False
 
 BFLOAT16_SUPPORTED = _probe_bfloat16_support()
 COMPUTE_DTYPE = torch.bfloat16 if BFLOAT16_SUPPORTED else torch.float16
