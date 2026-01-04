@@ -29,7 +29,7 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
     def define_schema(cls) -> io.Schema:        
         devices = get_device_list()
         vae_models = get_available_vae_models()
-        
+
         return io.Schema(
             node_id="SeedVR2LoadVAEModel",
             display_name="SeedVR2 (Down)Load VAE Model",

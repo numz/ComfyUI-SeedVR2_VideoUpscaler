@@ -45,7 +45,7 @@ def get_gpu_backend() -> str:
     return 'cpu'
 
 
-def get_device_list(include_none: bool = False, include_cpu: bool = False) -> List[str]:
+def get_device_list(include_none: bool = False, include_cpu: bool = True) -> List[str]:
     """
     Get list of available compute devices for SeedVR2
     
@@ -119,7 +119,15 @@ def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]
             free_memory = mem.total - mem.used
             total_memory = mem.total
         else:
-            return {"error": "No GPU backend available (CUDA/MPS)"}
+            from loguru import logger
+            logger.info("SeedVR2_VideoUpscaler: use fake memory info")
+            free_memory, total_memory = (24893718528*2, 25438126080*2)
+            free_gb = free_memory / (1024**3)
+            total_gb = total_memory / (1024**3)
+            return {
+                "free_gb": free_gb,
+                "total_gb": total_gb
+            }
         
         return {
             "free_gb": free_memory / (1024**3),
