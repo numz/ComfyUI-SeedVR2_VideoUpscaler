@@ -19,6 +19,7 @@ from torch import nn
 
 from ...common.cache import Cache
 from ...common.distributed.ops import slice_inputs
+from ...optimization.compatibility import portable_repeat_interleave
 
 # (dim: int, emb_dim: int)
 ada_layer_type = Callable[[int, int], nn.Module]
@@ -75,7 +76,7 @@ class AdaSingle(nn.Module):
             emb = cache(
                 f"emb_repeat_{idx}_{branch_tag}",
                 lambda: slice_inputs(
-                    torch.repeat_interleave(emb, hid_len, dim=0),
+                    portable_repeat_interleave(emb, hid_len, dim=0),
                     dim=0,
                 ),
             )

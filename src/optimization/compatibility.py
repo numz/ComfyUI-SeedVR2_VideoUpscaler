@@ -640,6 +640,129 @@ def _check_conv3d_memory_bug():
 NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND = _check_conv3d_memory_bug()
 
 
+# 5. AMD ROCm/HIP Detection and Portable Operations
+def _check_is_rocm() -> bool:
+    """Check if running on AMD ROCm/HIP backend."""
+    return hasattr(torch.version, 'hip') and torch.version.hip is not None
+
+IS_ROCM = _check_is_rocm()
+
+
+def portable_repeat_interleave(
+    input: torch.Tensor,
+    repeats: "Union[int, torch.Tensor]",
+    dim: int = 0,
+    debug: "Optional[Debug]" = None,
+) -> torch.Tensor:
+    """
+    Cross-platform replacement for torch.repeat_interleave.
+    
+    torch.repeat_interleave can trigger hipErrorIllegalState on AMD ROCm 
+    due to HIP kernel bugs. This function uses torch.arange + torch.index_select 
+    as a portable alternative on ROCm, while using the native (faster) 
+    implementation on CUDA/CPU.
+    
+    Supports both:
+    - Scalar repeats: repeat each element the same number of times
+    - Tensor repeats: different repeat count per element
+    
+    Args:
+        input: Input tensor to repeat elements from
+        repeats: Int or 1D LongTensor of repeat counts
+        dim: Dimension along which to repeat (default: 0)
+        debug: Optional Debug instance for logging tensor diagnostics
+        
+    Returns:
+        Tensor with elements repeated along dim according to repeats
+        
+    Example (scalar):
+        >>> x = torch.tensor([1, 2, 3])
+        >>> portable_repeat_interleave(x, 2, dim=0)
+        tensor([1, 1, 2, 2, 3, 3])
+        
+    Example (tensor):
+        >>> x = torch.tensor([[1, 2], [3, 4], [5, 6]])
+        >>> repeats = torch.tensor([2, 1, 3])
+        >>> portable_repeat_interleave(x, repeats, dim=0)
+        tensor([[1, 2], [1, 2], [3, 4], [5, 6], [5, 6], [5, 6]])
+    """
+    # Handle scalar repeats (int or 0-dim tensor)
+    is_scalar_repeat = isinstance(repeats, int) or (
+        isinstance(repeats, torch.Tensor) and repeats.dim() == 0
+    )
+    
+    # Debug logging for tensor state diagnostics
+    if debug is not None:
+        def _tensor_info(name: str, t: torch.Tensor) -> str:
+            return (f"{name}: device={t.device}, dtype={t.dtype}, "
+                    f"shape={list(t.shape)}, contiguous={t.is_contiguous()}")
+        repeats_info = str(repeats) if is_scalar_repeat else _tensor_info('repeats', repeats)
+        debug.log(
+            f"portable_repeat_interleave called:\n"
+            f"  {_tensor_info('input', input)}\n"
+            f"  repeats={repeats_info} (scalar={is_scalar_repeat})\n"
+            f"  dim={dim}, IS_ROCM={IS_ROCM}",
+            level="DEBUG",
+            category="rocm_compat"
+        )
+    
+    if not IS_ROCM:
+        # Use native implementation on CUDA/CPU - faster when it works
+        return torch.repeat_interleave(input, repeats, dim=dim)
+    
+    # ROCm-safe implementation using index expansion
+    # This avoids the buggy HIP kernel in torch.repeat_interleave
+    
+    if is_scalar_repeat:
+        # Scalar repeat: each element repeated same number of times
+        # Build indices [0,0,1,1,2,2,...] for repeat=2
+        repeat_count = int(repeats)
+        num_elements = input.shape[dim]
+        # Create indices: [0,1,2,...] then repeat each
+        indices = torch.arange(num_elements, device=input.device, dtype=torch.long)
+        # Use repeat + reshape to expand: [0,1,2] -> [[0,0],[1,1],[2,2]] -> [0,0,1,1,2,2]
+        expanded_indices = indices.unsqueeze(1).expand(-1, repeat_count).reshape(-1)
+    else:
+        # Tensor repeat: different count per element
+        # Strategy: Build index tensor mapping each output position to source position
+        # For repeats=[2, 1, 3], build indices=[0, 0, 1, 2, 2, 2]
+        
+        # Ensure repeats is on same device as input
+        if repeats.device != input.device:
+            repeats = repeats.to(input.device)
+        
+        num_elements = repeats.shape[0]
+        indices = torch.arange(num_elements, device=input.device, dtype=torch.long)
+        
+        # Try repeat_interleave on indices first (simpler 1D case may work)
+        try:
+            expanded_indices = torch.repeat_interleave(indices, repeats)
+        except RuntimeError as e:
+            # Ultimate fallback: build indices manually (slower but always works)
+            if debug is not None:
+                debug.log(
+                    f"repeat_interleave on indices failed, using manual fallback: {e}",
+                    level="WARNING",
+                    category="rocm_compat"
+                )
+            indices_list = []
+            repeats_cpu = repeats.cpu().tolist()
+            for i, r in enumerate(repeats_cpu):
+                indices_list.extend([i] * int(r))
+            expanded_indices = torch.tensor(indices_list, device=input.device, dtype=torch.long)
+    
+    result = torch.index_select(input, dim, expanded_indices)
+    
+    if debug is not None:
+        debug.log(
+            f"portable_repeat_interleave result: {_tensor_info('output', result)}",
+            level="DEBUG", 
+            category="rocm_compat"
+        )
+    
+    return result
+
+
 # Log all optimization status once globally (cross-process) using environment variable
 if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
     os.environ["SEEDVR2_OPTIMIZATIONS_LOGGED"] = "1"

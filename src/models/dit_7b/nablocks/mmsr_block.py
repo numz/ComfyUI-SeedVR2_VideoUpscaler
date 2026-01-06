@@ -20,6 +20,7 @@ from torch.nn import functional as F
 # from ..cache import Cache
 from ....common.cache import Cache
 from ....common.distributed.ops import gather_heads_scatter_seq, gather_seq_scatter_heads_qkv
+from ....optimization.compatibility import portable_repeat_interleave
 
 from .. import na
 from ..attention import FlashAttentionVarlen
@@ -117,7 +118,7 @@ class NaSwinAttention(MMWindowAttention):
         txt_len = cache("txt_len", lambda: txt_shape.prod(-1))
 
         vid_len_win = cache_win("vid_len", lambda: window_shape.prod(-1))
-        txt_len_win = cache_win("txt_len", lambda: txt_len.repeat_interleave(window_count))
+        txt_len_win = cache_win("txt_len", lambda: portable_repeat_interleave(txt_len, window_count, dim=0))
         all_len_win = cache_win("all_len", lambda: vid_len_win + txt_len_win)
         concat_win, unconcat_win = cache_win(
             "mm_pnp", lambda: na.repeat_concat_idx(vid_len_win, txt_len, window_count)
