@@ -81,17 +81,18 @@ def get_device_list(include_none: bool = False, include_cpu: bool = False) -> Li
     if include_none:
         result.append("none")
     
-    # Only include "cpu" option if:
-    # 1. It was requested (include_cpu=True), AND
-    # 2. Either CUDA is available OR MPS is not the only option
+    # Add CPU to the list if:
+    # 1. It was explicitly requested (include_cpu=True), OR
+    # 2. No GPU backend is available (CUDA/MPS both unavailable)
     # Rationale: On MPS-only systems with unified memory architecture,
-    # CPU offloading is semantically meaningless as CPU and GPU share the same memory pool
-    if include_cpu and (has_cuda or not has_mps):
+    # CPU offloading is semantically meaningless as CPU and GPU share the same memory pool,
+    # but we still need CPU as an inference device when no GPU is available
+    if include_cpu or (not has_cuda and not has_mps):
         result.append("cpu")
     
     result.extend(devs)
     
-    return result if result else []
+    return result
 
 
 def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]:
