@@ -587,7 +587,7 @@ def process_single_file(input_path: str, args: argparse.Namespace, device_list: 
     
     # Save single image
     os.makedirs(Path(output_path).parent, exist_ok=True)
-    frame_np = (result[0].cpu().numpy() * 255.0).astype(np.uint8)
+    frame_np = result[0].cpu().mul(255.0).clamp_(0, 255).to(torch.uint8).numpy()
     _save_image_bgr(frame_np, output_path)
     
     debug.log(f"Output saved to: {output_path}", category="file", force=True)
@@ -760,7 +760,7 @@ def save_frames_to_video(
     Raises:
         ValueError: If video writer cannot be initialized
     """
-    frames_np = (frames_tensor.cpu().numpy() * 255.0).astype(np.uint8)
+    frames_np = frames_tensor.cpu().mul(255.0).clamp_(0, 255).to(torch.uint8).numpy()
     T, H, W, C = frames_np.shape
     
     if writer is None:
@@ -806,7 +806,7 @@ def save_frames_to_image(
     """
     os.makedirs(output_dir, exist_ok=True)
     
-    frames_np = (frames_tensor.cpu().numpy() * 255.0).astype(np.uint8)
+    frames_np = frames_tensor.cpu().mul(255.0).clamp_(0, 255).to(torch.uint8).numpy()
     total = frames_np.shape[0]
     
     if start_index == 0:
