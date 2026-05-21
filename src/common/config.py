@@ -73,9 +73,33 @@ def swap_layers_recursively(model, target_ops):
                 )
 
         # 2b. Handle InflatedCausalConv3d
-        elif isinstance (child, InflatedCausalConv3d) and hasattr(target_ops, "Conv3d"):
-            child.__bases__ = (target_ops.Conv3d,)
-            new_layer = child
+        elif isinstance(child, InflatedCausalConv3d) and hasattr(target_ops, "Conv3d"):
+
+            class PatchedCausalConv3d(InflatedCausalConv3d, target_ops.Conv3d):
+                def __init__(self, layer):
+                    # 1. Initialize target_ops.Conv3d using the exact parameters from the old layer
+                    super().__init__(
+                        in_channels=layer.in_channels,
+                        out_channels=layer.out_channels,
+                        kernel_size=layer.kernel_size,
+                        stride=layer.stride,
+                        padding=(layer.temporal_padding, *layer.padding[1:]), # Restore true padding for init
+                        dilation=layer.dilation,
+                        groups=layer.groups,
+                        bias=(layer.bias is not None),
+                        device=layer.weight.device,
+                        dtype=layer.weight.dtype,
+                        inflation_mode = layer.inflation_mode,
+                        memory_device = layer.memory_device
+                    )
+
+            # Instantiate, share weight/bias references, and replace
+            new_layer = PatchedCausalConv3d(child)
+            new_layer.weight = child.weight
+            if child.bias is not None:
+                new_layer.bias = child.bias
+
+            setattr(model, name, new_layer)
 
         # 3. Handle Normalization Layers
         elif isinstance(child, nn.LayerNorm) and hasattr(target_ops, "LayerNorm"):
