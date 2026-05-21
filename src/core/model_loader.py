@@ -52,6 +52,7 @@ import os
 import torch
 from omegaconf import OmegaConf
 from typing import Dict, Any, Optional, Tuple, Union, Callable
+import comfy
 
 # Import SafeTensors with fallback
 try:
@@ -118,7 +119,7 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
         
         # Try direct device loading first (optimal path)
         try:
-            state = load_safetensors_file(checkpoint_path, device=device_str)
+            state = comfy.utils.load_torch_file(checkpoint_path, device=device_str)
         except RuntimeError as e:
             # MPS allocator fallback: some PyTorch/macOS versions have issues with
             # direct MPS loading (allocation failures, watermark errors, etc.)
@@ -132,7 +133,7 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
                 if debug:
                     debug.log("Using CPU intermediate loading for MPS compatibility", 
                             category="info", indent_level=1)
-                state = load_safetensors_file(checkpoint_path, device="cpu")
+                state = comfy.utils.load_torch_file(checkpoint_path, device=device_str)
                 # Tensors will be moved to MPS during model.load_state_dict()
             else:
                 # Re-raise if it's a different error (file corruption, etc.)
