@@ -593,7 +593,7 @@ def _initialize_cache_context(
     # Model name validation prevents stale cache when user switches models in UI
     if dit_cache and dit_model and dit_id is not None:
         cached_model = global_cache.get_dit({'node_id': dit_id, 'cache_model': True}, debug)
-        if cached_model:
+        if cached_model is not None:
             # Verify cached model matches requested model by checking _model_name attribute
             cached_model_name = getattr(cached_model, '_model_name', None)
             if cached_model_name == dit_model:
@@ -613,7 +613,7 @@ def _initialize_cache_context(
     # Check for cached VAE model with model name validation
     if vae_cache and vae_model and vae_id is not None:
         cached_model = global_cache.get_vae({'node_id': vae_id, 'cache_model': True}, debug)
-        if cached_model:
+        if cached_model is not None:
             # Verify cached model matches requested model by checking _model_name attribute
             cached_model_name = getattr(cached_model, '_model_name', None)
             if cached_model_name == vae_model:
