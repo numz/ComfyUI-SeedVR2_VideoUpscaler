@@ -492,7 +492,7 @@ def encode_all_batches(
             del transformed_video, rgb_video
             
             # Convert from VAE dtype to compute dtype and offload to avoid VRAM accumulation
-            if ctx['tensor_offload_device'] is not None and (cond_latents[0].is_cuda or cond_latents[0].is_mps):
+            if ctx['tensor_offload_device'] is not None and (cond_latents[0].is_cuda or cond_latents[0].is_mps or cond_latents[0].is_xpu):
                 ctx['all_latents'][encode_idx] = manage_tensor(
                     tensor=cond_latents[0],
                     target_device=ctx['tensor_offload_device'],
@@ -731,7 +731,7 @@ def upscale_all_batches(
             debug.end_timer(f"dit_inference_{upscale_idx+1}", f"DiT inference {upscale_idx+1}")
             
             # Offload upscaled latents to avoid VRAM accumulation
-            if ctx['tensor_offload_device'] is not None and (upscaled_latents[0].is_cuda or upscaled_latents[0].is_mps):
+            if ctx['tensor_offload_device'] is not None and (upscaled_latents[0].is_cuda or upscaled_latents[0].is_mps or upscaled_latents[0].is_xpu):
                 ctx['all_upscaled_latents'][upscale_idx] = manage_tensor(
                     tensor=upscaled_latents[0],
                     target_device=ctx['tensor_offload_device'],

@@ -214,12 +214,12 @@ class Debug:
             gpu_str = "CPU"
             cudnn_ver = "N/A"
         
-        # Flash Attn, SageAttn & Triton - reuse existing module constants
+        # Attention and compiler backend status - reuse existing module constants
         try:
             from ..optimization.compatibility import (
                 FLASH_ATTN_2_AVAILABLE, FLASH_ATTN_3_AVAILABLE,
                 SAGE_ATTN_2_AVAILABLE, SAGE_ATTN_3_AVAILABLE,
-                TRITON_AVAILABLE
+                TRITON_AVAILABLE, OMNI_XPU_AVAILABLE
             )
             fa_parts = []
             if FLASH_ATTN_3_AVAILABLE:
@@ -235,9 +235,10 @@ class Debug:
                 sa_parts.append("2")
             sage_str = f"v{','.join(sa_parts)} ✓" if sa_parts else "✗"
             
+            omni_xpu_str = "✓" if OMNI_XPU_AVAILABLE else "✗"
             triton_str = "✓" if TRITON_AVAILABLE else "✗"
         except ImportError:
-            flash_str = sage_str = triton_str = "?"
+            flash_str = sage_str = omni_xpu_str = triton_str = "?"
         
         # ComfyUI version
         comfy_str = None
@@ -250,7 +251,7 @@ class Debug:
         
         # Print
         self.log(f"OS: {os_str} | GPU: {gpu_str}", category="info")
-        self.log(f"Python: {py_ver} | PyTorch: {torch_ver} | FlashAttn: {flash_str} | SageAttn: {sage_str} | Triton: {triton_str}", category="info")
+        self.log(f"Python: {py_ver} | PyTorch: {torch_ver} | OmniXPU: {omni_xpu_str} | FlashAttn: {flash_str} | SageAttn: {sage_str} | Triton: {triton_str}", category="info")
         cuda_line = f"CUDA: {cuda_ver} | cuDNN: {cudnn_ver}"
         self.log(f"{cuda_line} | ComfyUI: {comfy_str}" if comfy_str else cuda_line, category="info")
         self.log("", category="none")

@@ -123,6 +123,9 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
             # MPS allocator fallback: some PyTorch/macOS versions have issues with
             # direct MPS loading (allocation failures, watermark errors, etc.)
             error_msg = str(e).lower()
+            is_xpu_alloc_error = device.type == "xpu" and any(
+                keyword in error_msg for keyword in ["watermark", "allocat", "memory"]
+            )
             is_mps_alloc_error = device.type == "mps" and any(
                 keyword in error_msg for keyword in ["watermark", "allocat", "memory"]
             )
@@ -134,6 +137,13 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
                             category="info", indent_level=1)
                 state = load_safetensors_file(checkpoint_path, device="cpu")
                 # Tensors will be moved to MPS during model.load_state_dict()
+            elif is_xpu_alloc_error:
+                # Transparent fallback - only log if debug enabled
+                if debug:
+                    debug.log("Using CPU intermediate loading for XPU compatibility",
+                            category="info", indent_level=1)
+                state = load_safetensors_file(checkpoint_path, device="cpu")
+                # Tensors will be moved to XPU during model.load_state_dict()
             else:
                 # Re-raise if it's a different error (file corruption, etc.)
                 raise

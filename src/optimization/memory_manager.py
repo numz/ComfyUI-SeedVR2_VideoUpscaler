@@ -15,9 +15,13 @@ from typing import Tuple, Dict, Any, Optional, List, Union
 
 
 def _device_str(device: Union[torch.device, str]) -> str:
-    """Normalized uppercase device string for comparison and logging. MPS variants → 'MPS'."""
+    """Normalized uppercase device string for comparison and logging."""
     s = str(device).upper()
-    return 'MPS' if s.startswith('MPS') else s
+    if s.startswith('MPS'):
+        return 'MPS'
+    if s.startswith('XPU'):
+        return 'XPU'
+    return s
 
 
 def is_mps_available() -> bool:
@@ -30,6 +34,11 @@ def is_cuda_available() -> bool:
     return torch.cuda.is_available()
 
 
+def is_xpu_available() -> bool:
+    """Check if Intel XPU backend is available."""
+    return hasattr(torch, 'xpu') and torch.xpu.is_available()
+
+
 def get_gpu_backend() -> str:
     """Get the active GPU backend type.
     
@@ -40,6 +49,8 @@ def get_gpu_backend() -> str:
     """
     if is_cuda_available():
         return 'cuda'
+    if is_xpu_available():
+        return 'xpu'
     if is_mps_available():
         return 'mps'
     return 'cpu'
@@ -61,11 +72,20 @@ def get_device_list(include_none: bool = False, include_cpu: bool = False) -> Li
     devs = []
     has_cuda = False
     has_mps = False
+    has_xpu = False
     
     try:
         if is_cuda_available():
             devs += [f"cuda:{i}" for i in range(torch.cuda.device_count())]
             has_cuda = True
+    except Exception:
+        pass
+
+    try:
+        if is_xpu_available():
+            device_count = torch.xpu.device_count() if hasattr(torch.xpu, 'device_count') else 1
+            devs += [f"xpu:{i}" for i in range(device_count)]
+            has_xpu = True
     except Exception:
         pass
     
@@ -86,7 +106,7 @@ def get_device_list(include_none: bool = False, include_cpu: bool = False) -> Li
     # 2. Either CUDA is available OR MPS is not the only option
     # Rationale: On MPS-only systems with unified memory architecture,
     # CPU offloading is semantically meaningless as CPU and GPU share the same memory pool
-    if include_cpu and (has_cuda or not has_mps):
+    if include_cpu and (has_cuda or has_xpu or not has_mps):
         result.append("cpu")
     
     result.extend(devs)
@@ -112,6 +132,12 @@ def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]
             elif not isinstance(device, torch.device):
                 device = torch.device(device)
             free_memory, total_memory = torch.cuda.mem_get_info(device)
+        elif is_xpu_available():
+            # Intel iGPUs use shared memory. PyTorch XPU does not expose CUDA-like
+            # mem_get_info on all builds, so system memory is the safest proxy.
+            mem = psutil.virtual_memory()
+            free_memory = mem.available
+            total_memory = mem.total
         elif is_mps_available():
             # MPS doesn't support per-device queries or mem_get_info
             # Use system memory as proxy
@@ -119,7 +145,7 @@ def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]
             free_memory = mem.total - mem.used
             total_memory = mem.total
         else:
-            return {"error": "No GPU backend available (CUDA/MPS)"}
+            return {"error": "No GPU backend available (CUDA/MPS/XPU)"}
         
         return {
             "free_gb": free_memory / (1024**3),
@@ -132,7 +158,7 @@ def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]
 # Initial VRAM check at module load
 vram_info = get_basic_vram_info(device=None)
 if "error" not in vram_info:
-    backend = "MPS" if is_mps_available() else "CUDA"
+    backend = "XPU" if is_xpu_available() else ("MPS" if is_mps_available() else "CUDA")
     print(f"📊 Initial {backend} memory: {vram_info['free_gb']:.2f}GB free / {vram_info['total_gb']:.2f}GB total")
 else:
     print(f"⚠️ Memory check failed: {vram_info['error']} - No available backend!")
@@ -161,6 +187,16 @@ def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug
             reserved = torch.cuda.memory_reserved(device) / (1024**3)
             peak_allocated = torch.cuda.max_memory_allocated(device) / (1024**3)
             peak_reserved = torch.cuda.max_memory_reserved(device) / (1024**3)
+            return allocated, reserved, peak_allocated, peak_reserved
+        elif is_xpu_available():
+            if device is None:
+                device = torch.device("xpu:0")
+            elif not isinstance(device, torch.device):
+                device = torch.device(device)
+            allocated = torch.xpu.memory_allocated(device) / (1024**3) if hasattr(torch.xpu, 'memory_allocated') else 0.0
+            reserved = torch.xpu.memory_reserved(device) / (1024**3) if hasattr(torch.xpu, 'memory_reserved') else 0.0
+            peak_allocated = torch.xpu.max_memory_allocated(device) / (1024**3) if hasattr(torch.xpu, 'max_memory_allocated') else allocated
+            peak_reserved = torch.xpu.max_memory_reserved(device) / (1024**3) if hasattr(torch.xpu, 'max_memory_reserved') else reserved
             return allocated, reserved, peak_allocated, peak_reserved
         elif is_mps_available():
             # MPS doesn't support per-device queries - uses global memory tracking
@@ -268,7 +304,7 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
             if free_ratio < 0.05:
                 should_clear = True
                 if debug:
-                    backend = "Unified Memory" if is_mps_available() else "VRAM"
+                    backend = "XPU" if is_xpu_available() else ("Unified Memory" if is_mps_available() else "VRAM")
                     debug.log(f"{backend} pressure: {mem_info['free_gb']:.2f}GB free of {mem_info['total_gb']:.2f}GB", category="memory")
         
         # For non-MPS systems, also check system RAM separately
@@ -298,6 +334,8 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
     if is_cuda_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
+    elif is_xpu_available():
+        torch.xpu.empty_cache()
     elif is_mps_available():
         torch.mps.empty_cache()
     
@@ -418,6 +456,12 @@ def reset_vram_peak(device: Optional[torch.device] = None, debug: Optional['Debu
             elif not isinstance(device, torch.device):
                 device = torch.device(device)
             torch.cuda.reset_peak_memory_stats(device)
+        elif is_xpu_available() and hasattr(torch.xpu, 'reset_peak_memory_stats'):
+            if device is None:
+                device = torch.device("xpu:0")
+            elif not isinstance(device, torch.device):
+                device = torch.device(device)
+            torch.xpu.reset_peak_memory_stats(device)
         # Note: MPS doesn't support peak memory reset - no action needed
     except Exception as e:
         if debug and debug.enabled:
@@ -561,14 +605,14 @@ def release_model_memory(model: Optional[torch.nn.Module], debug: Optional['Debu
         released_buffers = 0
         
         for param in model.parameters():
-            if param.is_cuda or param.is_mps:
+            if param.is_cuda or param.is_mps or param.is_xpu:
                 if param.numel() > 0:
                     param.data.set_()
                     released_params += 1
                 param.grad = None
                 
         for buffer in model.buffers():
-            if buffer.is_cuda or buffer.is_mps:
+            if buffer.is_cuda or buffer.is_mps or buffer.is_xpu:
                 if buffer.numel() > 0:
                     buffer.data.set_()
                     released_buffers += 1
@@ -766,7 +810,7 @@ def _handle_blockswap_model_movement(runner: Any, model: torch.nn.Module,
         # Check if any parameter is on GPU (for accurate logging)
         actual_source_device = None
         for param in model.parameters():
-            if param.device.type in ['cuda', 'mps']:
+            if param.device.type in ['cuda', 'mps', 'xpu']:
                 actual_source_device = param.device
                 break
         
@@ -916,7 +960,7 @@ def _standard_model_movement(model: torch.nn.Module, current_device: torch.devic
         cleared_count = 0
         for module in model.modules():
             if hasattr(module, 'memory') and module.memory is not None:
-                if torch.is_tensor(module.memory) and (module.memory.is_cuda or module.memory.is_mps):
+                if torch.is_tensor(module.memory) and (module.memory.is_cuda or module.memory.is_mps or module.memory.is_xpu):
                     module.memory = None
                     cleared_count += 1
         if cleared_count > 0 and debug:

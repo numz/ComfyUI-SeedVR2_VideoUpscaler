@@ -518,7 +518,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
 
             # Ensure CPU tensor in float32 for maximum ComfyUI compatibility
             if torch.is_tensor(sample):
-                if sample.is_cuda or sample.is_mps:
+                if sample.is_cuda or sample.is_mps or sample.is_xpu:
                     sample = sample.cpu()
                 if sample.dtype != torch.float32:
                     src_dtype = sample.dtype

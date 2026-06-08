@@ -1,3 +1,96 @@
+# ComfyUI SeedVR2 Intel XPU Fork
+
+This fork tracks `numz/ComfyUI-SeedVR2_VideoUpscaler` and adds experimental Intel XPU / PyTorch XPU support for ComfyUI users running on Intel Arc and Core Ultra GPUs.
+
+The goal is to make SeedVR2 discoverable and usable on systems where `torch.xpu.is_available()` is true, without requiring CUDA. It exposes Intel devices such as `xpu:0` in the DiT and VAE loader nodes, adds conservative shared-memory reporting for Intel iGPU/XPU systems, keeps PyTorch SDPA as the safe default attention path, and optionally enables Intel Omni XPU SDP attention through `attention_mode=omni_xpu`.
+
+This Intel XPU support code was generated with Codex and is based on local testing plus implementation ideas from Intel's `llm-scaler` Omni patch set and ComfyUI optimization node:
+
+- https://github.com/intel/llm-scaler/tree/main/omni/patches
+- https://github.com/intel/llm-scaler/tree/main/omni/ComfyUI-OmniXPU
+
+## Intel XPU Omni Attention
+
+`attention_mode=omni_xpu` uses `omni_xpu_kernel.sdp` as a FlashAttention-style SDP path for supported Intel XPU tensors. It is optional: if the kernel is missing or a shape is unsupported, this fork falls back to PyTorch SDPA and logs the reason.
+
+Supported fast-path cases are intentionally conservative:
+
+- Intel XPU tensor on `xpu:0`
+- `torch.float16` or `torch.bfloat16`
+- head dimension 64 or 128
+- no dropout, no causal mask, no custom softmax scale
+- self-attention packed sequences where q/k/v lengths match
+
+Unsupported cases fall back to SDPA. SeedVR2 7B also contains internal window/masked attention paths that can still use PyTorch SDPA; this is expected.
+
+### Install with Intel ComfyUI-OmniXPU
+
+This fork only adds the SeedVR2-side `omni_xpu` attention option. For the actual Intel SDP kernel and ComfyUI monkey patches, install Intel's ComfyUI-OmniXPU node:
+
+```bat
+cd /d D:\ComfyUI_windows_portable\ComfyUI\custom_nodes
+git clone https://github.com/intel/llm-scaler.git llm-scaler
+xcopy llm-scaler\omni\ComfyUI-OmniXPU ComfyUI-OmniXPU /E /I /Y
+```
+
+Then install a matching `omni_xpu_kernel` wheel into ComfyUI portable Python:
+
+```bat
+D:\ComfyUI_windows_portable\python_embeded\python.exe -m pip install --force-reinstall --no-deps path\to\omni_xpu_kernel-0.1.0-cp313-cp313-win_amd64.whl
+```
+
+This fork's `wheels/` directory may contain locally built Windows CPython 3.13 wheels for common Intel XPU targets. These wheels are community builds for ComfyUI portable Python 3.13 and are not official Intel releases.
+
+| Wheel folder | Intended devices | Build target |
+| --- | --- | --- |
+| `wheels/ptl_h` | Core Ultra Series 3 / Panther Lake, Arc B390/B370 style integrated graphics | `ptl-h` |
+| `wheels/xe3_lpg` | Generic Xe3-LPG fallback | `xe3-lpg` |
+| `wheels/xe2_lpg` | Core Ultra Series 2 / Lunar Lake and Arrow Lake-H integrated Arc 140V/140T style graphics | `xe2-lpg` |
+| `wheels/lnl_m` | Lunar Lake narrow target, use only if the generic Xe2 wheel is not suitable | `lnl-m` |
+| `wheels/bmg` | Discrete Arc B-series / Battlemage | `bmg` |
+
+Notes:
+
+- Panther Lake / Arc B390/B370 style integrated GPUs should use `ptl_h`, not `bmg`.
+- Arrow Lake-H / Arc 140T should use the generic `xe2_lpg` wheel. The experimental `arl-h` AOT target failed to build in local testing, so it is not distributed here.
+- Meteor Lake / Core Ultra Series 1 wheels are not included in this fork release because the local `mtl-h` build did not complete successfully.
+- Users do not need the full Intel oneAPI compiler runtime to run these wheels, but the required runtime DLLs must be available in the ComfyUI portable Python environment.
+
+### Known Intel XPU Notes
+
+- Keep `OMNIXPU_NORM=0` unless you are specifically testing Intel norm kernels. In local Z-Image testing, OmniXPU's RMSNorm path could crash inside the native SYCL/C++ kernel. SeedVR2 `omni_xpu` attention does not require the norm patch.
+- Avoid rebinding `transformers` lazy modules with `getattr(mod, name, None)` when monkey-patching `sys.modules`; it can trigger noisy lazy imports. Check `mod.__dict__` instead.
+- Be careful with `comfy.rmsnorm.rms_norm`: it is a functional RMSNorm path used by several ComfyUI models. Patching it globally can affect models outside SeedVR2.
+- CacheDiT is not recommended for low-step Z-Image-Turbo workflows. Aggressive settings can degrade image quality; conservative defaults can produce 0 cache hits and no speedup. It is unrelated to SeedVR2 `omni_xpu` attention.
+- `torch.compile` may recompile frequently on interactive prompt/shape changes and can be slower than eager mode for this workflow.
+
+Validated locally on Windows portable ComfyUI with PyTorch `2.12.0+xpu` and Intel Core Ultra x7 358H:
+
+- DiT: `seedvr2_ema_3b-Q8_0.gguf` and `seedvr2_ema_7b-Q8_0.gguf`
+- VAE: `ema_vae_fp16.safetensors`
+- Device: `xpu:0`
+- Attention: `sdpa` and `omni_xpu`
+- 768x768 image to 1080x1080
+- 1280x720 image to 3640x2048 with tiled VAE encode/decode
+- 1280x720 RGBA image to 3640x2048 using 7B Q8 GGUF completed successfully in 110.58 seconds on the tested Intel XPU setup
+- Z-Image-Turbo Q8 + SeedVR2 3B Q8 workflow completed successfully with `attention_mode=omni_xpu`; local first-run timing improved from about 166 seconds with SDPA to about 150 seconds with Omni XPU attention on the tested setup
+
+Additional XPU compatibility improvements adapted from the Intel Omni patch approach include XPU-aware tensor offload checks, torchvision resize fallback settings, XPU output tensor handling, safetensors CPU-intermediate fallback for XPU allocation errors, and more complete XPU memory cleanup paths.
+
+Suggested Intel XPU starting settings:
+
+- DiT device: `xpu:0`
+- VAE device: `xpu:0`
+- Attention mode: `omni_xpu` if `omni_xpu_kernel` is installed, otherwise `sdpa`
+- Batch size: `1` for single images
+- Offload device: `cpu`
+- Torch compile: leave disconnected for interactive image upscaling
+
+This is experimental community work, not official Intel or upstream SeedVR2 support. CUDA-only acceleration backends such as Flash Attention and SageAttention are not enabled for XPU by this fork.
+
+Upstream PR: https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/pull/590
+
+---
 # ComfyUI-SeedVR2_VideoUpscaler
 
 [![View Code](https://img.shields.io/badge/📂_View_Code-GitHub-181717?style=for-the-badge&logo=github)](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
@@ -464,6 +557,7 @@ Configure the DiT (Diffusion Transformer) model for video upscaling.
 
 - **attention_mode**: Attention computation backend
   - `sdpa`: PyTorch scaled_dot_product_attention (default, always available)
+  - `omni_xpu`: Intel Omni XPU SDP (Intel GPU, requires omni_xpu_kernel)
   - `flash_attn_2`: Flash Attention 2 (Ampere+, requires flash-attn package)
   - `flash_attn_3`: Flash Attention 3 (Hopper+, requires flash-attn with FA3 support)
   - `sageattn_2`: SageAttention 2 (requires sageattention package)
@@ -931,7 +1025,7 @@ python inference_cli.py media_folder/ \
 
 **Performance Optimization:**
 - `--allow_vram_overflow`: Allow VRAM overflow to system RAM. Prevents OOM but may cause severe slowdown
-- `--attention_mode`: Attention backend: 'sdpa' (default), 'flash_attn_2' (Ampere+), 'flash_attn_3' (Hopper+), 'sageattn_2', or 'sageattn_3' (Blackwell)
+- `--attention_mode`: Attention backend: 'sdpa' (default), 'omni_xpu' (Intel XPU), 'flash_attn_2' (Ampere+), 'flash_attn_3' (Hopper+), 'sageattn_2', or 'sageattn_3' (Blackwell)
 - `--compile_dit`: Enable torch.compile for DiT model (20-40% speedup, requires PyTorch 2.0+ and Triton)
 - `--compile_vae`: Enable torch.compile for VAE model (15-25% speedup, requires PyTorch 2.0+ and Triton)
 - `--compile_backend`: Compilation backend: 'inductor' (full optimization) or 'cudagraphs' (lightweight) (default: inductor)

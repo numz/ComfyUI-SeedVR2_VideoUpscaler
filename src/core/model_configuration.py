@@ -171,7 +171,7 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     Generate human-readable description of attention mode configuration.
     
     Args:
-        attention_mode: Attention mode string ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        attention_mode: Attention mode string ('sdpa', 'omni_xpu', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         
     Returns:
         Human-readable description string
@@ -181,6 +181,7 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     
     mode_descriptions = {
         'sdpa': 'PyTorch SDPA',
+        'omni_xpu': 'Intel Omni XPU SDP',
         'flash_attn_2': 'Flash Attention 2',
         'flash_attn_3': 'Flash Attention 3',
         'sageattn_2': 'SageAttention 2',
@@ -439,7 +440,7 @@ def _update_dit_config(
             - dynamic: bool - Enable dynamic shapes
             - dynamo_cache_size_limit: int - Cache size limit
             - dynamo_recompile_limit: int - Recompilation limit
-        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        attention_mode: Attention computation backend ('sdpa', 'omni_xpu', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         debug: Debug instance for logging
         
     Returns:
@@ -774,7 +775,7 @@ def configure_runner(
         decode_tile_size: Tile size for decoding (height, width)
         decode_tile_overlap: Tile overlap for decoding (height, width)
         tile_debug: Tile visualization mode (false/encode/decode)
-        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        attention_mode: Attention computation backend ('sdpa', 'omni_xpu', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: Optional torch.compile configuration for DiT model
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
         
@@ -868,7 +869,7 @@ def _configure_runner_settings(
         decode_tile_size: Tile dimensions (height, width) for decoding in pixels
         decode_tile_overlap: Overlap dimensions (height, width) between decoding tiles
         tile_debug: Tile visualization mode (false/encode/decode)
-        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        attention_mode: Attention computation backend ('sdpa', 'omni_xpu', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: torch.compile configuration for DiT model or None
         torch_compile_args_vae: torch.compile configuration for VAE model or None
         block_swap_config: BlockSwap configuration for DiT model or None
@@ -1196,7 +1197,15 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
             
             # Get compute_dtype from runner
             compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)            
-            debug.log(f"Applying {attention_mode} attention mode and {compute_dtype} compute dtype to model", category="setup")
+            if requested_attention_mode != attention_mode:
+                debug.log(
+                    f"Requested attention mode '{requested_attention_mode}' fell back to '{attention_mode}'",
+                    level="WARNING", category="setup", force=True
+                )
+            debug.log(
+                f"Using attention mode: {attention_mode} (requested={requested_attention_mode}, compute_dtype={compute_dtype})",
+                category="setup", force=True
+            )
             
             # Get the actual model (unwrap if needed)
             actual_model = model.dit_model if hasattr(model, 'dit_model') else model
@@ -1207,6 +1216,7 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
                 if type(module).__name__ == 'FlashAttentionVarlen':
                     module.attention_mode = attention_mode
                     module.compute_dtype = compute_dtype
+                    module.debug = debug
                     updated_count += 1
             
             if updated_count > 0:

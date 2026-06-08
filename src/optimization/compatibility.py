@@ -56,6 +56,23 @@ def ensure_flash_attn_safe():
         sys.modules['flash_attn'] = stub
 
 
+def ensure_transformers_flash_attn_mapping_safe():
+    """
+    Transformers 5.x may raise KeyError while checking optional flash_attn
+    packages if the distribution mapping lacks flash attention entries.
+    SeedVR2 can run with SDPA, so the optional check should resolve to False
+    rather than aborting plugin import.
+    """
+    try:
+        from transformers.utils import import_utils
+        mapping = getattr(import_utils, "PACKAGE_DISTRIBUTION_MAPPING", None)
+        if isinstance(mapping, dict):
+            mapping.setdefault("flash_attn", ["flash-attn"])
+            mapping.setdefault("flash_attn_interface", ["flash-attn-3"])
+    except Exception:
+        pass
+
+
 def ensure_xformers_flash_compat():
     """
     Pre-test xformers._C_flashattention; stub if DLL is broken.
@@ -111,6 +128,7 @@ def ensure_bitsandbytes_safe():
 # Run all shims immediately on import, before torch/diffusers
 ensure_triton_compat()
 ensure_flash_attn_safe()
+ensure_transformers_flash_attn_mapping_safe()
 ensure_xformers_flash_compat()
 ensure_bitsandbytes_safe()
 
@@ -171,18 +189,53 @@ except (ImportError, AttributeError, OSError):
 
 SAGE_ATTN_AVAILABLE = SAGE_ATTN_2_AVAILABLE or SAGE_ATTN_3_AVAILABLE
 
+# 5. Intel Omni XPU SDP (XPU FlashAttention-style kernel)
+omni_xpu_sdp = None
+OMNI_XPU_AVAILABLE = False
+try:
+    import omni_xpu_kernel as _omni_xpu_kernel
+    from omni_xpu_kernel.sdp import sdp as _omni_xpu_sdp
+
+    if (
+        getattr(_omni_xpu_kernel, "is_available", lambda: False)()
+        and hasattr(torch, "xpu")
+        and torch.xpu.is_available()
+    ):
+        omni_xpu_sdp = _omni_xpu_sdp
+        OMNI_XPU_AVAILABLE = True
+except Exception:
+    pass
+
 
 def validate_attention_mode(requested_mode: str, debug=None) -> str:
     """
     Validate attention mode availability with automatic fallback.
     
     Args:
-        requested_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3'
+        requested_mode: 'sdpa', 'omni_xpu', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3'
         debug: Optional debug instance for logging
         
     Returns:
         Validated mode that is available
     """
+    # Intel Omni XPU SDP
+    if requested_mode == 'omni_xpu':
+        if OMNI_XPU_AVAILABLE:
+            return requested_mode
+        error_msg = (
+            "Cannot use 'omni_xpu' attention mode: omni_xpu_kernel SDP is not available.\n"
+            "\n"
+            "Omni XPU uses Intel XPU kernels for supported fp16/bf16 attention shapes.\n"
+            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+            "\n"
+            "To fix this issue:\n"
+            "  1. Run repair_omni_xpu_after_update.bat from the ComfyUI portable folder\n"
+            "  2. OR change attention_mode to 'sdpa' (default, always available)"
+        )
+        if debug:
+            debug.log(error_msg, level="WARNING", category="setup", force=True)
+        return 'sdpa'
+
     # Flash Attention 3
     if requested_mode == 'flash_attn_3':
         if FLASH_ATTN_3_AVAILABLE:
@@ -545,6 +598,25 @@ def call_sage_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, m
     return out.to(out_dtype) if out.dtype != out_dtype else out
 
 
+@torch._dynamo.disable
+def call_omni_xpu_sdp(q, k, v):
+    """
+    Wrapper for Intel Omni XPU SDP.
+
+    Args:
+        q: Query tensor (batch, seq, heads, head_dim)
+        k: Key tensor (batch, seq, heads, head_dim)
+        v: Value tensor (batch, seq, heads, head_dim)
+
+    Returns:
+        Attention output tensor (batch, seq, heads, head_dim)
+    """
+    if not OMNI_XPU_AVAILABLE or omni_xpu_sdp is None:
+        raise ImportError("Omni XPU SDP is not available")
+
+    return omni_xpu_sdp(q, k, v)
+
+
 # 2. Triton - Required for torch.compile with inductor backend
 try:
     import triton
@@ -643,26 +715,30 @@ NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND = _check_conv3d_memory_bug()
 # Log all optimization status once globally (cross-process) using environment variable
 if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
     os.environ["SEEDVR2_OPTIMIZATIONS_LOGGED"] = "1"
-    
+
     # Build status strings
+    omni_status = "✅" if OMNI_XPU_AVAILABLE else "❌"
     sage_status = "✅" if SAGE_ATTN_AVAILABLE else "❌"
     flash_status = "✅" if FLASH_ATTN_AVAILABLE else "❌"
     triton_status = "✅" if TRITON_AVAILABLE else "❌"
-    
+
     # Count available optimizations
-    available = [SAGE_ATTN_AVAILABLE, FLASH_ATTN_AVAILABLE, TRITON_AVAILABLE]
+    available = [OMNI_XPU_AVAILABLE, SAGE_ATTN_AVAILABLE, FLASH_ATTN_AVAILABLE, TRITON_AVAILABLE]
     num_available = sum(available)
-    
-    if num_available == 3:
-        print(f"⚡ SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
-    elif num_available == 0:
-        print(f"⚠️  SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
-        print("💡 For best performance: pip install sageattention flash-attn triton")
+
+    icon = "⚡" if num_available > 0 else "⚠️ "
+    print(
+        f"{icon} SeedVR2 optimizations check: "
+        f"OmniXPU {omni_status} | "
+        f"SageAttention {sage_status} | "
+        f"Flash Attention {flash_status} | "
+        f"Triton {triton_status}"
+    )
+
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        if not OMNI_XPU_AVAILABLE:
+            print("💡 Intel XPU: run repair_omni_xpu_after_update.bat to enable OmniXPU attention.")
     else:
-        icon = "⚡" if num_available >= 2 else "⚠️ "
-        print(f"{icon} SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
-        
-        # Build install suggestions for missing packages
         missing = []
         if not SAGE_ATTN_AVAILABLE:
             missing.append("sageattention")
@@ -672,7 +748,7 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
             missing.append("triton")
         if missing:
             print(f"💡 Optional: pip install {' '.join(missing)}")
-    
+
     # Conv3d workaround status (if applicable)
     if NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND:
         torch_ver = torch.__version__.split('+')[0]
@@ -798,6 +874,8 @@ class CompatibleDiT(torch.nn.Module):
                     if module.rope.freqs.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
                         if module.rope.freqs.device.type == "mps":
                             module.rope.freqs.data = module.rope.freqs.to("cpu").to(target_dtype).to("mps")
+                        elif module.rope.freqs.device.type == "xpu":
+                            module.rope.freqs.data = module.rope.freqs.to("cpu").to(target_dtype).to("xpu")
                         else:
                             module.rope.freqs.data = module.rope.freqs.to(target_dtype)
                         converted += 1
@@ -823,6 +901,11 @@ class CompatibleDiT(torch.nn.Module):
                     temp_converted = temp_cpu.to(target_dtype)
                     param.data = temp_converted.to("mps")
                     del temp_cpu, temp_converted
+                elif param.device.type == "xpu":
+                    temp_cpu = param.data.to("cpu")
+                    temp_converted = temp_cpu.to(target_dtype)
+                    param.data = temp_converted.to("xpu")
+                    del temp_cpu, temp_converted
                 else:
                     param.data = param.data.to(target_dtype)
                 converted_count += 1
@@ -837,6 +920,11 @@ class CompatibleDiT(torch.nn.Module):
                     temp_cpu = buffer.data.to("cpu")
                     temp_converted = temp_cpu.to(target_dtype)
                     buffer.data = temp_converted.to("mps")
+                    del temp_cpu, temp_converted
+                elif buffer.device.type == "xpu":
+                    temp_cpu = buffer.data.to("cpu")
+                    temp_converted = temp_cpu.to(target_dtype)
+                    buffer.data = temp_converted.to("xpu")
                     del temp_cpu, temp_converted
                 else:
                     buffer.data = buffer.data.to(target_dtype)
