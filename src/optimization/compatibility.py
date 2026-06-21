@@ -681,21 +681,86 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
 
 
 # Bfloat16 CUBLAS support
+#
+# Original behavior performed a CUDA BF16 matmul probe at import time and
+# re-raised most CUDA errors. Under WSL / Blackwell / newer PyTorch builds this
+# can fail with ``CUDA driver error: unknown error`` while ComfyUI is merely
+# importing custom nodes, which prevents the whole SeedVR2 node pack from
+# loading. Import-time CUDA probes must be best-effort only.
+_SEEDVR2_BFLOAT16_PATCH = "wsl-safe-import-probe-2026-06-21"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _env_flag_set(name: str):
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip().lower()
+    if value in ("1", "true", "yes", "y", "on"):
+        return True
+    if value in ("0", "false", "no", "n", "off"):
+        return False
+    return None
+
+
 def _probe_bfloat16_support() -> bool:
-    if not torch.cuda.is_available():
+    """
+    Import-safe BF16 capability selection.
+
+    Defaults to float16 without touching CUDA at import time. This keeps the
+    custom node importable even if the CUDA context/driver is temporarily in a
+    bad state during ComfyUI startup.
+
+    Environment controls:
+      SEEDVR2_FORCE_BFLOAT16=1  -> force BF16 on, no probe
+      SEEDVR2_FORCE_BFLOAT16=0  -> force BF16 off, no probe
+      SEEDVR2_IMPORT_BFLOAT16_PROBE=1 -> run best-effort CUDA probe at import
+    """
+    forced = _env_flag_set("SEEDVR2_FORCE_BFLOAT16")
+    if forced is True:
+        print("[SeedVR2] BF16 forced on via SEEDVR2_FORCE_BFLOAT16=1", flush=True)
         return True
+    if forced is False:
+        print("[SeedVR2] BF16 forced off via SEEDVR2_FORCE_BFLOAT16=0; using float16", flush=True)
+        return False
+
+    # Safer default: do not allocate CUDA tensors while ComfyUI is importing
+    # custom nodes. Users who want automatic probing can opt in explicitly.
+    if not _env_flag("SEEDVR2_IMPORT_BFLOAT16_PROBE", default=False):
+        print("[SeedVR2] Import-time BF16 CUDA probe skipped; using float16. Set SEEDVR2_IMPORT_BFLOAT16_PROBE=1 to probe.", flush=True)
+        return False
+
     try:
-        a = torch.randn(8, 8, dtype=torch.bfloat16, device='cuda:0')
-        _ = torch.matmul(a, a)
-        del a
-        return True
-    except RuntimeError as e:
-        if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e):
+        if not torch.cuda.is_available():
             return False
-        raise
+        with torch.no_grad():
+            a = torch.empty((8, 8), dtype=torch.bfloat16, device="cuda:0")
+            b = torch.matmul(a, a)
+            torch.cuda.synchronize()
+            del a, b
+        return True
+    except BaseException as e:
+        # Never let an optional import-time feature probe kill the node pack.
+        try:
+            print(
+                f"[SeedVR2] BF16 CUDA import probe failed; disabling BF16 for this session: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+        except Exception:
+            pass
+        return False
+
 
 BFLOAT16_SUPPORTED = _probe_bfloat16_support()
 COMPUTE_DTYPE = torch.bfloat16 if BFLOAT16_SUPPORTED else torch.float16
+print(f"[SeedVR2] compute dtype selected at import: {COMPUTE_DTYPE}", flush=True)
 
 
 def call_rope_with_stability(method, *args, **kwargs):

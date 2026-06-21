@@ -5,7 +5,7 @@ Configure DiT (Diffusion Transformer) model with memory optimization
 
 from comfy_api.latest import io
 from comfy_execution.utils import get_executing_context
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 from ..utils.model_registry import get_available_dit_models, DEFAULT_DIT
 from ..optimization.memory_manager import get_device_list
 
@@ -124,6 +124,39 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                         "Provides 20-40% speedup with compatible PyTorch 2.0+ and Triton installation."
                     )
                 ),
+                io.Boolean.Input("dit_tiled",
+                    default=False,
+                    optional=True,
+                    tooltip=(
+                        "Enable spatial tiling for the DiT upscaling phase.\n"
+                        "Reduces peak VRAM during final SeedVR2 diffusion inference by processing latent tiles with overlap blending.\n"
+                        "Slower than full-frame DiT inference, but can prevent VRAM overflow on large crops."
+                    )
+                ),
+                io.Int.Input("dit_tile_size",
+                    default=128,
+                    min=32,
+                    max=2048,
+                    step=8,
+                    optional=True,
+                    tooltip=(
+                        "Spatial tile size for DiT inference in latent-space pixels (default: 128).\n"
+                        "Smaller tiles reduce VRAM further but increase runtime and may reduce global consistency.\n"
+                        "Only used when dit_tiled is enabled."
+                    )
+                ),
+                io.Int.Input("dit_tile_overlap",
+                    default=16,
+                    min=0,
+                    max=512,
+                    step=1,
+                    optional=True,
+                    tooltip=(
+                        "Overlap between DiT latent tiles in pixels (default: 16).\n"
+                        "Higher overlap reduces visible seams but increases compute.\n"
+                        "Only used when dit_tiled is enabled."
+                    )
+                ),
             ],
             outputs=[
                 io.Custom("SEEDVR2_DIT").Output(
@@ -136,7 +169,8 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
     def execute(cls, model: str, device: str, offload_device: str = "none",
                      cache_model: bool = False, blocks_to_swap: int = 0, 
                      swap_io_components: bool = False, attention_mode: str = "sdpa",
-                     torch_compile_args: Dict[str, Any] = None) -> io.NodeOutput:
+                     torch_compile_args: Dict[str, Any] = None, dit_tiled: bool = False,
+                     dit_tile_size: int = 128, dit_tile_overlap: int = 16) -> io.NodeOutput:
         """
         Create DiT model configuration for SeedVR2 main node
         
@@ -149,6 +183,9 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
             swap_io_components: Whether to offload I/O components (requires offload_device != device)
             attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
             torch_compile_args: Optional torch.compile configuration from settings node
+            dit_tiled: Enable spatial DiT tiling during upscaling
+            dit_tile_size: Spatial DiT tile size in latent-space pixels
+            dit_tile_overlap: Spatial overlap between DiT tiles in latent-space pixels
             
         Returns:
             NodeOutput containing configuration dictionary for SeedVR2 main node
@@ -174,6 +211,9 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
             "swap_io_components": swap_io_components,
             "attention_mode": attention_mode,
             "torch_compile_args": torch_compile_args,
+            "dit_tiled": dit_tiled,
+            "dit_tile_size": dit_tile_size,
+            "dit_tile_overlap": dit_tile_overlap,
             "node_id": get_executing_context().node_id,
         }
         

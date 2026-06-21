@@ -47,9 +47,11 @@ from ..optimization.memory_manager import (
     cleanup_dit,
     cleanup_vae,
     cleanup_text_embeddings,
+    is_model_cache_cold,
     manage_tensor,
     manage_model_device,
     release_tensor_memory,
+    synchronize_device,
     release_tensor_collection
 )
 from ..optimization.performance import (
@@ -141,7 +143,7 @@ def _reconstruct_and_transform_batch(
         Transformed video in CTHW format, ready for color correction
     """
     start_idx, end_idx, uniform_padding = ctx['batch_metadata'][batch_idx]
-    
+
     # Prepare video batch
     video = _prepare_video_batch(
         images=ctx['input_images'],
@@ -150,6 +152,17 @@ def _reconstruct_and_transform_batch(
         uniform_padding=uniform_padding,
         debug=None,
         log_info=False
+    )
+
+    # Mirror Phase 1 ordering: move to the VAE device before padding and transform.
+    video = manage_tensor(
+        tensor=video,
+        target_device=ctx['vae_device'],
+        tensor_name=f"reconstructed_video_batch_{batch_idx+1}",
+        dtype=ctx['compute_dtype'],
+        debug=debug,
+        reason="Phase 4 input reconstruction",
+        indent_level=1,
     )
     
     # Apply 4n+1 padding using shared helper
@@ -292,14 +305,23 @@ def encode_all_batches(
         ctx['batch_metadata'] = [None] * num_encode_batches
     
     encode_idx = 0
+    validated_computed_target_dims = False
     
     try:
+        vae_needs_reactivation = runner.vae is not None and is_model_cache_cold(runner.vae)
+
         # Materialize VAE if still on meta device
         if runner.vae and next(runner.vae.parameters()).device.type == 'meta':
             materialize_model(runner, "vae", ctx['vae_device'], runner.config, debug)
         else:
+            # Cold cached models keep weights/config, but execution state is rebuilt each run.
+            if vae_needs_reactivation:
+                debug.log("Rebuilding VAE execution state from cold cache", category="vae", force=True)
+                manage_model_device(model=runner.vae, target_device=ctx['vae_device'],
+                                  model_name="VAE", debug=debug, reason="cold-cache activation", runner=runner)
+                apply_model_specific_config(runner.vae, runner, runner.config, False, debug)
             # Model already materialized (cached) - apply any pending configs if needed
-            if getattr(runner, '_vae_config_needs_application', False):
+            elif getattr(runner, '_vae_config_needs_application', False):
                 debug.log("Applying updated VAE configuration", category="vae", force=True)
                 apply_model_specific_config(runner.vae, runner, runner.config, False, debug)
         
@@ -309,11 +331,13 @@ def encode_all_batches(
         # Cache VAE now that it's fully configured and ready for inference
         if ctx['cache_context']['vae_cache'] and not ctx['cache_context']['cached_vae']:
             runner.vae._model_name = ctx['cache_context']['vae_model']
-            ctx['cache_context']['global_cache'].set_vae(
+            cached_vae_id = ctx['cache_context']['global_cache'].set_vae(
                 {'node_id': ctx['cache_context']['vae_id'], 'cache_model': True}, 
                 runner.vae, ctx['cache_context']['vae_model'], debug
             )
-            ctx['cache_context']['vae_newly_cached'] = True
+            if cached_vae_id is not None:
+                ctx['cache_context']['vae_newly_cached'] = True
+                ctx['cache_context']['cached_vae'] = runner.vae
             
             # If both models now cached, cache runner template
             dit_is_cached = ctx['cache_context']['cached_dit'] or ctx['cache_context']['dit_newly_cached']
@@ -411,6 +435,34 @@ def encode_all_batches(
                 rgb_video = video
 
             transformed_video = ctx['video_transform'](rgb_video)
+
+            if (
+                not validated_computed_target_dims
+                and 'padded_target_dims' in ctx
+                and 'true_target_dims' in ctx
+            ):
+                actual_padded_h, actual_padded_w = transformed_video.shape[-2:]
+                expected_padded_h, expected_padded_w = ctx['padded_target_dims']
+                expected_true_h, expected_true_w = ctx['true_target_dims']
+
+                if (actual_padded_h, actual_padded_w) != (expected_padded_h, expected_padded_w):
+                    msg = (
+                        "Computed target dims mismatch: "
+                        f"expected padded {expected_padded_w}x{expected_padded_h}, "
+                        f"actual transform output {actual_padded_w}x{actual_padded_h}, "
+                        f"cached true target {expected_true_w}x{expected_true_h}"
+                    )
+                    if debug is not None:
+                        debug.log(msg, level="ERROR", category="setup", force=True)
+                    raise RuntimeError(msg)
+
+                if getattr(debug, "enabled", False):
+                    debug.log(
+                        f"Validated computed target dims against actual transform output: padded {expected_padded_w}x{expected_padded_h}, true {expected_true_w}x{expected_true_h}",
+                        category="setup",
+                        force=True,
+                    )
+                validated_computed_target_dims = True
 
             # Apply input noise if requested (to reduce artifacts at high resolutions)
             if input_noise_scale > 0:
@@ -616,12 +668,20 @@ def upscale_all_batches(
     upscale_idx = 0
     
     try:
+        dit_needs_reactivation = runner.dit is not None and is_model_cache_cold(runner.dit)
+
         # Materialize DiT if still on meta device
         if runner.dit and next(runner.dit.parameters()).device.type == 'meta':
             materialize_model(runner, "dit", ctx['dit_device'], runner.config, debug)
         else:
+            # Cold cached models keep weights/config, but execution state is rebuilt each run.
+            if dit_needs_reactivation:
+                debug.log("Rebuilding DiT execution state from cold cache", category="dit", force=True)
+                manage_model_device(model=runner.dit, target_device=ctx['dit_device'],
+                                    model_name="DiT", debug=debug, reason="cold-cache activation", runner=runner)
+                apply_model_specific_config(runner.dit, runner, runner.config, True, debug)
             # Model already materialized (cached) - apply any pending configs if needed
-            if getattr(runner, '_dit_config_needs_application', False):
+            elif getattr(runner, '_dit_config_needs_application', False):
                 debug.log("Applying updated DiT configuration", category="dit", force=True)
                 apply_model_specific_config(runner.dit, runner, runner.config, True, debug)
     
@@ -631,11 +691,13 @@ def upscale_all_batches(
         # Cache DiT now that it's fully configured and ready for inference
         if ctx['cache_context']['dit_cache'] and not ctx['cache_context']['cached_dit']:
             runner.dit._model_name = ctx['cache_context']['dit_model']
-            ctx['cache_context']['global_cache'].set_dit(
+            cached_dit_id = ctx['cache_context']['global_cache'].set_dit(
                 {'node_id': ctx['cache_context']['dit_id'], 'cache_model': True}, 
                 runner.dit, ctx['cache_context']['dit_model'], debug
             )
-            ctx['cache_context']['dit_newly_cached'] = True
+            if cached_dit_id is not None:
+                ctx['cache_context']['dit_newly_cached'] = True
+                ctx['cache_context']['cached_dit'] = runner.dit
             
             # If both models now cached, cache runner template
             vae_is_cached = ctx['cache_context']['cached_vae'] or ctx['cache_context']['vae_newly_cached']
@@ -1236,6 +1298,7 @@ def postprocess_all_batches(
                 sample = sample_thwc.permute(0, 3, 1, 2)  # [T, H, W, C] → [T, C, H, W]
             
             # Move to VAE device for processing
+            phase4_probe_enabled = getattr(debug, "enabled", False)
             sample = manage_tensor(
                 tensor=sample,
                 target_device=ctx['vae_device'],
@@ -1268,7 +1331,23 @@ def postprocess_all_batches(
                     # Trim spatial dimensions to true target size
                     if 'true_target_dims' in ctx:
                         true_h, true_w = ctx['true_target_dims']
-                        if input_video.shape[-2] != true_h or input_video.shape[-1] != true_w:
+                        current_h, current_w = input_video.shape[-2:]
+                        if current_h != true_h or current_w != true_w:
+                            if current_h < true_h or current_w < true_w:
+                                msg = (
+                                    "Reconstructed input spatial dims smaller than expected true target dims: "
+                                    f"{current_w}x{current_h} < {true_w}x{true_h}"
+                                )
+                                if debug:
+                                    debug.log(msg, level="ERROR", category="video", force=True)
+                                raise RuntimeError(msg)
+
+                            if debug:
+                                debug.log(
+                                    f"Trimming reconstructed input spatial padding: {current_w}x{current_h} → {true_w}x{true_h}",
+                                    category="video",
+                                    indent_level=1,
+                                )
                             input_video = input_video[:, :, :true_h, :true_w]
             
             # Apply color correction if enabled (RGB only)
@@ -1297,24 +1376,33 @@ def postprocess_all_batches(
                     
                 # Apply selected color correction method
                 debug.start_timer(f"color_correction_{color_correction}")
+                color_correction_applied = False
                 
                 if color_correction == "lab":
                     debug.log("Applying LAB perceptual color transfer", category="video", force=True, indent_level=1)
                     sample = lab_color_transfer(sample, input_video, debug, luminance_weight=0.8)
+                    color_correction_applied = True
                 elif color_correction == "wavelet_adaptive":
                     debug.log("Applying wavelet with adaptive saturation correction", category="video", force=True, indent_level=1)
                     sample = wavelet_adaptive_color_correction(sample, input_video, debug)
+                    color_correction_applied = True
                 elif color_correction == "wavelet":
                     debug.log("Applying wavelet color reconstruction", category="video", force=True, indent_level=1)
                     sample = wavelet_reconstruction(sample, input_video, debug)
+                    color_correction_applied = True
                 elif color_correction == "hsv":
                     debug.log("Applying HSV hue-conditional saturation matching", category="video", force=True, indent_level=1)
                     sample = hsv_saturation_histogram_match(sample, input_video, debug)
+                    color_correction_applied = True
                 elif color_correction == "adain":
                     debug.log("Applying AdaIN color correction", category="video", force=True, indent_level=1)
                     sample = adaptive_instance_normalization(sample, input_video)
+                    color_correction_applied = True
                 else:
                     debug.log(f"Unknown color correction method: {color_correction}", level="WARNING", category="video", force=True, indent_level=1)
+
+                if phase4_probe_enabled and color_correction_applied and sample.device.type != "cpu":
+                    synchronize_device(sample.device, debug=debug, reason=f"phase4 batch {info_idx+1} after {color_correction}")
                 
                 debug.end_timer(f"color_correction_{color_correction}", f"Color correction ({color_correction})")
                 
@@ -1466,6 +1554,8 @@ def postprocess_all_batches(
             del ctx['all_ori_lengths']
         if 'true_target_dims' in ctx:
             del ctx['true_target_dims']
+        if 'padded_target_dims' in ctx:
+            del ctx['padded_target_dims']
         if 'batch_metadata' in ctx:
             del ctx['batch_metadata']
         if 'input_images' in ctx:

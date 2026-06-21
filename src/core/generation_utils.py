@@ -29,8 +29,11 @@ These utilities support the 4-phase pipeline implemented in generation_phases.py
 
 import os
 import torch
-from typing import Dict, List, Optional, Tuple, Any, Callable, Union
+from typing import Dict, List, Optional, Tuple, Any, Callable, Union, TYPE_CHECKING
 from torchvision.transforms import Compose, Lambda, Normalize
+
+if TYPE_CHECKING:
+    from ..utils.debug import Debug
 
 from .model_configuration import configure_runner
 from .infer import VideoDiffusionInfer
@@ -42,6 +45,56 @@ from ..utils.constants import get_script_directory
 
 # Get script directory for embeddings
 script_directory = get_script_directory()
+
+
+def _compute_side_resize_output_dims(
+    input_height: int,
+    input_width: int,
+    resolution: int,
+    max_resolution: int = 0,
+) -> Tuple[int, int]:
+    """Compute output dims for the target-dimension probe path.
+
+    Matches SideResize with downsample_only=False and the current max_size
+    second pass, without executing the resize kernel.
+    """
+    short, long = (input_width, input_height) if input_width <= input_height else (input_height, input_width)
+
+    # Match torchvision Resize(int) behavior used by SideResize:
+    # shortest edge = resolution, longest edge scaled with floor(int(...))
+    resized_short = resolution
+    resized_long = int(resolution * long / short)
+
+    if input_width <= input_height:
+        resized_w, resized_h = resized_short, resized_long
+    else:
+        resized_w, resized_h = resized_long, resized_short
+
+    # Match SideResize's second-pass max_size handling exactly.
+    if max_resolution > 0 and max(resized_h, resized_w) > max_resolution:
+        scale = max_resolution / max(resized_h, resized_w)
+        resized_h = round(resized_h * scale)
+        resized_w = round(resized_w * scale)
+
+    return resized_h, resized_w
+
+
+def _compute_sample_frame_target_dims(
+    sample_frame: torch.Tensor,
+    resolution: int,
+    max_resolution: int = 0,
+    debug: Optional['Debug'] = None,
+) -> Tuple[int, int]:
+    """Compute probe target dimensions without running a real resize."""
+    input_h, input_w = sample_frame.shape[-2:]
+    resized_h, resized_w = _compute_side_resize_output_dims(
+        input_height=input_h,
+        input_width=input_w,
+        resolution=resolution,
+        max_resolution=max_resolution,
+    )
+
+    return resized_h, resized_w
 
 
 def prepare_video_transforms(resolution: int, max_resolution: int = 0, debug: Optional['Debug'] = None) -> Compose:
@@ -105,14 +158,41 @@ def setup_video_transform(ctx: Dict[str, Any], resolution: int, max_resolution: 
     existing_transform = ctx.get('video_transform')
     
     if existing_transform is not None:
-        # Transform exists - check if we need to compute dimensions
-        if 'true_target_dims' in ctx and sample_frame is not None:
-            # Return cached dimensions + recompute padded from sample
+        # Transform exists - return cached dimensions without re-running the pipeline
+        if 'true_target_dims' in ctx and 'padded_target_dims' in ctx:
             true_h, true_w = ctx['true_target_dims']
-            transformed = existing_transform(sample_frame)
-            padded_h, padded_w = transformed.shape[-2:]
+            padded_h, padded_w = ctx['padded_target_dims']
             if debug:
                 debug.log("Reusing pre-initialized video transformation pipeline", category="reuse")
+            return true_h, true_w, padded_h, padded_w
+        if sample_frame is not None:
+            resized_h, resized_w = _compute_sample_frame_target_dims(
+                sample_frame,
+                resolution,
+                max_resolution,
+                debug,
+            )
+
+            # Round to even numbers for video codec compatibility (libx264 requirement)
+            true_h = (resized_h // 2) * 2
+            true_w = (resized_w // 2) * 2
+
+            # Cache for later use in trimming
+            ctx['true_target_dims'] = (true_h, true_w)
+
+            # Compute padded dimensions from the resized shape before even-rounding
+            padded_h = ((resized_h + 15) // 16) * 16
+            padded_w = ((resized_w + 15) // 16) * 16
+            ctx['padded_target_dims'] = (padded_h, padded_w)
+
+            if debug:
+                if true_h == padded_h and true_w == padded_w:
+                    debug.log(f"Target dimensions: {true_w}x{true_h} (no padding needed)",
+                             category="setup", indent_level=1)
+                else:
+                    debug.log(f"Target dimensions: {true_w}x{true_h} (padded to {padded_w}x{padded_h} for processing)",
+                             category="setup", indent_level=1)
+
             return true_h, true_w, padded_h, padded_w
         elif debug:
             debug.log("Reusing pre-initialized video transformation pipeline", category="reuse")
@@ -124,23 +204,24 @@ def setup_video_transform(ctx: Dict[str, Any], resolution: int, max_resolution: 
     # Compute dimensions if sample frame provided
     if sample_frame is not None:
         # Get true target size (after resize, before padding)
-        temp_transform = Compose([
-            NaResize(resolution=resolution, mode="side", downsample_only=False, max_resolution=max_resolution),
-            Lambda(lambda x: torch.clamp(x, 0.0, 1.0))
-        ])
-        resized_sample = temp_transform(sample_frame)
-        true_h, true_w = resized_sample.shape[-2:]
+        resized_h, resized_w = _compute_sample_frame_target_dims(
+            sample_frame,
+            resolution,
+            max_resolution,
+            debug,
+        )
         
         # Round to even numbers for video codec compatibility (libx264 requirement)
-        true_h = (true_h // 2) * 2
-        true_w = (true_w // 2) * 2
+        true_h = (resized_h // 2) * 2
+        true_w = (resized_w // 2) * 2
         
         # Cache for later use in trimming
         ctx['true_target_dims'] = (true_h, true_w)
-        
-        # Get padded dimensions
-        transformed_sample = ctx['video_transform'](sample_frame)
-        padded_h, padded_w = transformed_sample.shape[-2:]
+
+        # Compute padded dimensions from the resized shape before even-rounding
+        padded_h = ((resized_h + 15) // 16) * 16
+        padded_w = ((resized_w + 15) // 16) * 16
+        ctx['padded_target_dims'] = (padded_h, padded_w)
         
         if debug:
             if true_h == padded_h and true_w == padded_w:
@@ -149,8 +230,7 @@ def setup_video_transform(ctx: Dict[str, Any], resolution: int, max_resolution: 
             else:
                 debug.log(f"Target dimensions: {true_w}x{true_h} (padded to {padded_w}x{padded_h} for processing)", 
                          category="setup", indent_level=1)
-        
-        del temp_transform, resized_sample, transformed_sample
+
         return true_h, true_w, padded_h, padded_w
     
     return 0, 0, 0, 0
@@ -436,6 +516,9 @@ def prepare_runner(
     decode_tile_size: Optional[Tuple[int, int]] = None,
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
+    dit_tiled: bool = False,
+    dit_tile_size: Optional[Tuple[int, int]] = None,
+    dit_tile_overlap: Optional[Tuple[int, int]] = None,
     attention_mode: str = 'sdpa',
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
     torch_compile_args_vae: Optional[Dict[str, Any]] = None
@@ -462,6 +545,9 @@ def prepare_runner(
         decode_tile_size: Tile size for decoding (height, width)
         decode_tile_overlap: Tile overlap for decoding (height, width)
         tile_debug: Tile visualization mode (false/encode/decode)
+        dit_tiled: Enable spatial DiT tiling during upscaling
+        dit_tile_size: Spatial DiT tile size (height, width) in latent-space pixels
+        dit_tile_overlap: Spatial overlap (height, width) between DiT tiles in latent-space pixels
         attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: Optional torch.compile configuration for DiT model
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
@@ -506,6 +592,9 @@ def prepare_runner(
         decode_tile_size=decode_tile_size,
         decode_tile_overlap=decode_tile_overlap,
         tile_debug=tile_debug,
+        dit_tiled=dit_tiled,
+        dit_tile_size=dit_tile_size,
+        dit_tile_overlap=dit_tile_overlap,
         attention_mode=attention_mode,
         torch_compile_args_dit=torch_compile_args_dit,
         torch_compile_args_vae=torch_compile_args_vae

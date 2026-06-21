@@ -39,7 +39,9 @@ class VideoDiffusionInfer():
                  encode_tile_overlap: Tuple[int, int] = (64, 64),
                  decode_tiled: bool = False, decode_tile_size: Tuple[int, int] = (512, 512),
                  decode_tile_overlap: Tuple[int, int] = (64, 64),
-                 tile_debug: str = "false"):
+                 tile_debug: str = "false",
+                 dit_tiled: bool = False, dit_tile_size: Tuple[int, int] = (128, 128),
+                 dit_tile_overlap: Tuple[int, int] = (16, 16)):
         self.config = config
         self.debug = debug
         # Store separate encode and decode tiling parameters
@@ -50,6 +52,9 @@ class VideoDiffusionInfer():
         self.decode_tile_size = decode_tile_size
         self.decode_tile_overlap = decode_tile_overlap
         self.tile_debug = tile_debug
+        self.dit_tiled = dit_tiled
+        self.dit_tile_size = dit_tile_size
+        self.dit_tile_overlap = dit_tile_overlap
         
     def get_condition(self, latent: Tensor, latent_blur: Tensor, task: str) -> Tensor:
         t, h, w, c = latent.shape
@@ -310,9 +315,68 @@ class VideoDiffusionInfer():
         timesteps = timesteps * self.schedule.T
         return timesteps
 
+    @staticmethod
+    def _tile_axis_starts(length: int, tile: int, overlap: int) -> List[int]:
+        if length <= tile:
+            return [0]
 
-    @torch.no_grad()
-    def inference(
+        stride = max(1, tile - overlap)
+        starts: List[int] = []
+        start = 0
+        while True:
+            starts.append(start)
+            if start + tile >= length:
+                break
+            next_start = min(start + stride, length - tile)
+            if next_start <= start:
+                break
+            start = next_start
+        return starts
+
+    @staticmethod
+    def _tile_blend_vector(
+        length: int,
+        overlap: int,
+        is_start_edge: bool,
+        is_end_edge: bool,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        weight = torch.ones((length,), device=device, dtype=dtype)
+        if overlap <= 0 or length <= 1:
+            return weight
+
+        ramp_extent = min(overlap, length - 1)
+        if ramp_extent <= 0:
+            return weight
+
+        ramp = torch.linspace(1.0 / (ramp_extent + 1), 1.0, steps=ramp_extent, device=device, dtype=dtype)
+        if not is_start_edge:
+            weight[:ramp_extent] = ramp
+        if not is_end_edge:
+            weight[-ramp_extent:] = torch.minimum(weight[-ramp_extent:], torch.flip(ramp, dims=[0]))
+        return weight
+
+    def _dit_blend_mask(
+        self,
+        tile_h: int,
+        tile_w: int,
+        y0: int,
+        y1: int,
+        x0: int,
+        x1: int,
+        full_h: int,
+        full_w: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        overlap_h = max(0, min(self.dit_tile_overlap[0], tile_h - 1))
+        overlap_w = max(0, min(self.dit_tile_overlap[1], tile_w - 1))
+        weight_y = self._tile_blend_vector(tile_h, overlap_h, y0 == 0, y1 >= full_h, device, dtype)
+        weight_x = self._tile_blend_vector(tile_w, overlap_w, x0 == 0, x1 >= full_w, device, dtype)
+        return (weight_y[:, None] * weight_x[None, :]).view(1, tile_h, tile_w, 1)
+
+    def _inference_flat(
         self,
         noises: List[Tensor],
         conditions: List[Tensor],
@@ -323,15 +387,12 @@ class VideoDiffusionInfer():
         assert len(noises) == len(conditions) == len(texts_pos) == len(texts_neg)
         batch_size = len(noises)
 
-        # Return if empty.
         if batch_size == 0:
             return []
-        
-        # Set cfg scale
+
         if cfg_scale is None:
             cfg_scale = self.config.diffusion.cfg.scale
-        
-        # Text embeddings.
+
         assert type(texts_pos[0]) is type(texts_neg[0])
         if isinstance(texts_pos[0], str):
             text_pos_embeds, text_pos_shapes = self.text_encode(texts_pos)
@@ -350,11 +411,10 @@ class VideoDiffusionInfer():
         else:
             text_pos_embeds, text_pos_shapes = na.flatten(texts_pos)
             text_neg_embeds, text_neg_shapes = na.flatten(texts_neg)
-        
-        # Flatten.
+
         latents, latents_shapes = na.flatten(noises)
         latents_cond, _ = na.flatten(conditions)
-        
+
         latents = self.sampler.sample(
             x=latents,
             f=lambda args: classifier_free_guidance_dispatcher(
@@ -384,12 +444,115 @@ class VideoDiffusionInfer():
 
         latents = na.unflatten(latents, latents_shapes)
 
-        # Clean up temporary tensors
         del latents_cond
         del latents_shapes
         del text_pos_embeds
         del text_neg_embeds
         del text_pos_shapes
         del text_neg_shapes
-            
+
         return latents
+
+    def _inference_tiled_single(
+        self,
+        noise: Tensor,
+        condition: Tensor,
+        texts_pos: Union[List[str], List[Tensor], List[Tuple[Tensor]]],
+        texts_neg: Union[List[str], List[Tensor], List[Tuple[Tensor]]],
+        cfg_scale: Optional[float] = None,
+    ) -> Tensor:
+        if noise.ndim != 4 or condition.ndim != 4:
+            return self._inference_flat([noise], [condition], texts_pos, texts_neg, cfg_scale=cfg_scale)[0]
+
+        _, full_h, full_w, _ = noise.shape
+        tile_h = max(1, min(self.dit_tile_size[0], full_h))
+        tile_w = max(1, min(self.dit_tile_size[1], full_w))
+
+        if full_h <= tile_h and full_w <= tile_w:
+            return self._inference_flat([noise], [condition], texts_pos, texts_neg, cfg_scale=cfg_scale)[0]
+
+        overlap_h = max(0, min(self.dit_tile_overlap[0], tile_h - 1))
+        overlap_w = max(0, min(self.dit_tile_overlap[1], tile_w - 1))
+        y_starts = self._tile_axis_starts(full_h, tile_h, overlap_h)
+        x_starts = self._tile_axis_starts(full_w, tile_w, overlap_w)
+        tile_count = len(y_starts) * len(x_starts)
+
+        if self.debug is not None:
+            self.debug.log(
+                f"Using DiT tiled inference ({tile_count} tiles, size {tile_h}x{tile_w}, overlap {overlap_h}x{overlap_w})",
+                category="dit",
+                force=True,
+                indent_level=1,
+            )
+
+        result = None
+        weight_sum = None
+        tile_index = 0
+
+        for y0 in y_starts:
+            y1 = min(y0 + tile_h, full_h)
+            for x0 in x_starts:
+                x1 = min(x0 + tile_w, full_w)
+                tile_index += 1
+                if self.debug is not None and (tile_index == 1 or tile_index == tile_count or tile_index % 4 == 0):
+                    self.debug.log(
+                        f"DiT tile {tile_index}/{tile_count}: y={y0}:{y1}, x={x0}:{x1}",
+                        category="dit",
+                        indent_level=2,
+                    )
+
+                noise_tile = noise[:, y0:y1, x0:x1, :]
+                condition_tile = condition[:, y0:y1, x0:x1, :]
+                tile_result = self._inference_flat([noise_tile], [condition_tile], texts_pos, texts_neg, cfg_scale=cfg_scale)[0]
+
+                if result is None:
+                    result = torch.zeros_like(noise)
+                    weight_sum = torch.zeros((*noise.shape[:-1], 1), device=noise.device, dtype=tile_result.dtype)
+
+                blend_mask = self._dit_blend_mask(
+                    tile_h=y1 - y0,
+                    tile_w=x1 - x0,
+                    y0=y0,
+                    y1=y1,
+                    x0=x0,
+                    x1=x1,
+                    full_h=full_h,
+                    full_w=full_w,
+                    device=tile_result.device,
+                    dtype=tile_result.dtype,
+                )
+
+                result[:, y0:y1, x0:x1, :] += tile_result * blend_mask
+                weight_sum[:, y0:y1, x0:x1, :] += blend_mask
+
+                del noise_tile, condition_tile, tile_result, blend_mask
+
+        weight_sum = torch.clamp(weight_sum, min=torch.finfo(weight_sum.dtype).eps)
+        result = result / weight_sum
+        del weight_sum
+        return result
+
+    @torch.no_grad()
+    def inference(
+        self,
+        noises: List[Tensor],
+        conditions: List[Tensor],
+        texts_pos: Union[List[str], List[Tensor], List[Tuple[Tensor]]],
+        texts_neg: Union[List[str], List[Tensor], List[Tuple[Tensor]]],
+        cfg_scale: Optional[float] = None,
+    ) -> List[Tensor]:
+        if len(noises) == 0:
+            return []
+
+        if not self.dit_tiled or len(noises) != 1:
+            return self._inference_flat(noises, conditions, texts_pos, texts_neg, cfg_scale=cfg_scale)
+
+        return [
+            self._inference_tiled_single(
+                noise=noises[0],
+                condition=conditions[0],
+                texts_pos=texts_pos,
+                texts_neg=texts_neg,
+                cfg_scale=cfg_scale,
+            )
+        ]

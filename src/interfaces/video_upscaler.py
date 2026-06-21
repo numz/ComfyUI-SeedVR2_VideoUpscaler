@@ -23,10 +23,15 @@ from ..core.generation_utils import (
     load_text_embeddings,
     script_directory
 )
+from ..core.model_configuration import (
+    _evict_claimed_cached_models,
+    _finalize_claimed_cached_models_for_reuse,
+)
 from ..optimization.memory_manager import (
     cleanup_text_embeddings,
     complete_cleanup,
-    get_device_list
+    get_device_list,
+    set_model_cache_claimed_state,
 )
 
 # Import ComfyUI progress reporting
@@ -267,6 +272,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
         # Track execution state in local variables (not instance)
         runner = None
         ctx = None
+        cache_context = None
         pbar = None
         
         # Define progress callback as local closure
@@ -319,8 +325,42 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
             
             # Use complete_cleanup for all cleanup operations
             if runner:
-                complete_cleanup(runner=runner, debug=debug, 
-                               dit_cache=dit_cache, vae_cache=vae_cache)
+                claimed_dit = cache_context.get('cached_dit') if cache_context is not None else None
+                claimed_vae = cache_context.get('cached_vae') if cache_context is not None else None
+                refreshed_dit = None
+                refreshed_vae = None
+                try:
+                    try:
+                        complete_cleanup(
+                            runner=runner,
+                            debug=debug,
+                            dit_cache=dit_cache,
+                            vae_cache=vae_cache,
+                        )
+                        if dit_cache or vae_cache:
+                            refreshed_dit, refreshed_vae = _finalize_claimed_cached_models_for_reuse(cache_context, runner, debug)
+                    except Exception:
+                        try:
+                            _evict_claimed_cached_models(cache_context, runner, debug)
+                        except Exception as evict_error:
+                            if debug is not None:
+                                debug.log(
+                                    f"Failed to evict claimed cached models while handling prior cleanup/finalize exception: {evict_error}",
+                                    level="WARNING",
+                                    category="cleanup",
+                                    force=True,
+                                )
+                        raise
+                finally:
+                    if dit_cache and claimed_dit is not None:
+                        set_model_cache_claimed_state(claimed_dit, False)
+                    if dit_cache and refreshed_dit is not None and refreshed_dit is not claimed_dit:
+                        set_model_cache_claimed_state(refreshed_dit, False)
+                    if vae_cache and claimed_vae is not None:
+                        set_model_cache_claimed_state(claimed_vae, False)
+                    if vae_cache and refreshed_vae is not None and refreshed_vae is not claimed_vae:
+                        set_model_cache_claimed_state(refreshed_vae, False)
+                    runner._seedvr2_execution_active = False
                 
                 # Delete runner only if neither model is cached
                 if not (dit_cache or vae_cache):
@@ -375,6 +415,9 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
 
         # TorchCompile args (optional connection, can be None)
         dit_torch_compile_args = dit.get("torch_compile_args")
+        dit_tiled = dit.get("dit_tiled", False)
+        dit_tile_size = max(1, int(dit.get("dit_tile_size", 128)))
+        dit_tile_overlap = max(0, int(dit.get("dit_tile_overlap", 16)))
         vae_torch_compile_args = vae.get("torch_compile_args")
         
         # Print header
@@ -431,10 +474,33 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                 decode_tile_size=(decode_tile_size, decode_tile_size),
                 decode_tile_overlap=(decode_tile_overlap, decode_tile_overlap),
                 tile_debug=tile_debug,
+                dit_tiled=dit_tiled,
+                dit_tile_size=(dit_tile_size, dit_tile_size),
+                dit_tile_overlap=(dit_tile_overlap, dit_tile_overlap),
                 attention_mode=attention_mode,
                 torch_compile_args_dit=dit_torch_compile_args,
                 torch_compile_args_vae=vae_torch_compile_args
             )
+
+            runner._seedvr2_execution_active = True
+            runner._seedvr2_runner_tainted = False
+            runner._seedvr2_dit_phase_cleaned = False
+            runner._seedvr2_vae_phase_cleaned = False
+
+            # If both models were already cached but the runner template had been
+            # invalidated or missing, cache this freshly configured runner now.
+            if (
+                cache_context is not None
+                and not cache_context.get('reusing_runner', False)
+                and cache_context.get('cached_dit') is not None
+                and cache_context.get('cached_vae') is not None
+            ):
+                cache_context['global_cache'].set_runner(
+                    cache_context.get('dit_id'),
+                    cache_context.get('vae_id'),
+                    runner,
+                    debug,
+                )
 
             # Store cache context in ctx for use in generation phases
             ctx['cache_context'] = cache_context
@@ -444,6 +510,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
             debug.log("Loaded text embeddings for DiT", category="dit")
 
             debug.log_memory_state("After model preparation", show_tensors=False, detailed_tensors=False)
+
             debug.end_timer("model_preparation", "Model preparation", force=True, show_breakdown=True)
             
             # Compute generation info and log start (handles prepending internally)
@@ -568,6 +635,9 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
             # Print footer
             debug.print_footer()
 
+            if runner is not None:
+                runner._seedvr2_runner_tainted = False
+
             debug.clear_history()
             pbar = None
             ctx = None
@@ -575,6 +645,42 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
             # V3-compatible return with optional UI preview
             return io.NodeOutput(sample)
             
-        except Exception as e:
-            cleanup(dit_cache=dit_cache, vae_cache=vae_cache)
-            raise e
+        except BaseException:
+            claimed_dit = cache_context.get('cached_dit') if cache_context is not None else None
+            claimed_vae = cache_context.get('cached_vae') if cache_context is not None else None
+            if cache_context is not None:
+                _evict_claimed_cached_models(cache_context, runner, debug)
+                if runner is not None and cache_context.get('reusing_runner', False):
+                    try:
+                        cache_context['global_cache'].taint_and_remove_runner(
+                            cache_context.get('dit_id'),
+                            cache_context.get('vae_id'),
+                            debug,
+                            expected_runner=runner,
+                        )
+                    except Exception as cache_error:
+                        if debug is not None:
+                            debug.log(
+                                f"Failed to evict cached runner while handling prior exception: {cache_error}",
+                                level="WARNING",
+                                category="cleanup",
+                                force=True,
+                            )
+
+            try:
+                try:
+                    cleanup(dit_cache=False, vae_cache=False)
+                except BaseException as cleanup_error:
+                    if debug is not None:
+                        debug.log(
+                            f"Cleanup failed while handling prior exception: {cleanup_error}",
+                            level="WARNING",
+                            category="cleanup",
+                            force=True,
+                        )
+            finally:
+                if claimed_dit is not None:
+                    set_model_cache_claimed_state(claimed_dit, False)
+                if claimed_vae is not None:
+                    set_model_cache_claimed_state(claimed_vae, False)
+            raise
