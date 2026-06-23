@@ -52,6 +52,10 @@ MODEL_REGISTRY = {
     "ema_vae_fp16.safetensors": ModelInfo(category="vae", precision="fp16", sha256="20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1"),
 }
 
+# Note: NVFP4 models (e.g., seedvr2_ema_3b_nvfp4.safetensors) will be discovered automatically
+# when placed in the models directory, even if not in the registry. NVFP4 support is handled
+# by the model loader which detects NVFP4 files via filename patterns or safetensors metadata.
+
 # Configuration constants
 DEFAULT_DIT = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
 DEFAULT_VAE = "ema_vae_fp16.safetensors"

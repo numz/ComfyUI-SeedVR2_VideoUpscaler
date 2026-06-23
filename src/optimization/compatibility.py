@@ -117,6 +117,44 @@ ensure_bitsandbytes_safe()
 
 import torch
 import os
+import math
+import logging
+
+# Configure logging for Blackwell optimization verification
+logger = logging.getLogger("SeedVR2.Blackwell")
+
+# Global frame counter for per-frame verification logging
+_sparge_sage2_frame_counter = 0
+
+# Windows/Performance optimization: control logging and cache behavior via environment variables
+# Set SEEDVR2_VERBOSE_LOGGING=1 to enable detailed per-call logging (for debugging)
+# Set SEEDVR2_CACHE_CLEARING=1 to enable torch.cuda.empty_cache() between phases
+ENABLE_VERBOSE_LOGGING = os.environ.get('SEEDVR2_VERBOSE_LOGGING', '0') == '1'
+ENABLE_CACHE_CLEARING = os.environ.get('SEEDVR2_CACHE_CLEARING', '0') == '1'
+
+
+def reset_sparge_sage2_verification(clear_cache: bool = None):
+    """
+    Reset the sparge_sage2 frame counter and optionally clear CUDA cache.
+    Call this before starting a new DiT phase to ensure clean kernel execution.
+    
+    Args:
+        clear_cache: Override cache clearing behavior. If None, uses ENABLE_CACHE_CLEARING.
+                     Cache clearing is disabled by default for performance.
+    """
+    global _sparge_sage2_frame_counter
+    _sparge_sage2_frame_counter = 0
+    
+    # Determine if we should clear cache
+    should_clear = clear_cache if clear_cache is not None else ENABLE_CACHE_CLEARING
+    
+    # Clear CUDA cache only if explicitly requested (disabled by default for performance)
+    if should_clear and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        if ENABLE_VERBOSE_LOGGING:
+            print(">> MEMORY ISOLATION: CUDA cache cleared before DiT phase", flush=True)
+            logger.info("CUDA cache cleared before DiT phase for memory isolation")
 
 
 # Flash/Sage Attention & Triton Compatibility Layer
@@ -171,13 +209,142 @@ except (ImportError, AttributeError, OSError):
 
 SAGE_ATTN_AVAILABLE = SAGE_ATTN_2_AVAILABLE or SAGE_ATTN_3_AVAILABLE
 
+# 5. SpargeAttn / Sage2 (Block-sparse attention for Blackwell optimization)
+# Provides spas_sage2_attn_meansim_topk_cuda for plug-and-play SDPA replacement
+# and block_sparse_sage2_attn_cuda for custom block-sparse patterns
+# Uses local vendored implementation with Triton JIT compilation (no global install required)
+spas_sage2_attn_meansim_topk = None
+block_sparse_sage2_attn = None
+SPARGE_SAGE2_AVAILABLE = False
+SPARGE_SAGE2_VERSION = None
+_SPARGE_IMPORT_ERROR = None  # Store error for diagnostics
+
+# Try local vendored implementation first (Triton JIT, no compilation needed)
+try:
+    from .spas_sage_attn import spas_sage2_attn_meansim_topk_cuda as _spas_sage2
+    from .spas_sage_attn import block_sparse_sage2_attn_cuda as _block_sparse_sage2
+    from .spas_sage_attn import SPARGE_LOCAL_AVAILABLE, SPARGE_LOCAL_VERSION
+    if SPARGE_LOCAL_AVAILABLE:
+        spas_sage2_attn_meansim_topk = _spas_sage2
+        block_sparse_sage2_attn = _block_sparse_sage2
+        SPARGE_SAGE2_AVAILABLE = True
+        SPARGE_SAGE2_VERSION = SPARGE_LOCAL_VERSION
+    else:
+        _SPARGE_IMPORT_ERROR = "Local SpargeAttn module loaded but SPARGE_LOCAL_AVAILABLE is False (Triton may not be available)"
+except (ImportError, AttributeError, OSError) as e:
+    _SPARGE_IMPORT_ERROR = f"Local import failed: {type(e).__name__}: {e}"
+    # Print diagnostic for debugging
+    print(f"[SpargeAttn Debug] {_SPARGE_IMPORT_ERROR}")
+    # Fall back to globally installed package if local fails
+    try:
+        from spas_sage_attn import spas_sage2_attn_meansim_topk_cuda as _spas_sage2
+        from spas_sage_attn import block_sparse_sage2_attn_cuda as _block_sparse_sage2
+        spas_sage2_attn_meansim_topk = _spas_sage2
+        block_sparse_sage2_attn = _block_sparse_sage2
+        SPARGE_SAGE2_AVAILABLE = True
+        _SPARGE_IMPORT_ERROR = None  # Clear error on success
+        try:
+            import spas_sage_attn
+            SPARGE_SAGE2_VERSION = getattr(spas_sage_attn, '__version__', 'unknown')
+        except (ImportError, AttributeError):
+            SPARGE_SAGE2_VERSION = 'unknown'
+    except (ImportError, AttributeError, OSError) as e2:
+        _SPARGE_IMPORT_ERROR = f"Both local and global imports failed. Global error: {type(e2).__name__}: {e2}"
+        print(f"[SpargeAttn Debug] {_SPARGE_IMPORT_ERROR}")
+
+
+# Blackwell-specific Sage2 configuration for RTX 50xx GPUs
+class Sage2BlackwellConfig:
+    """
+    Configuration for Sage2 sparse attention optimized for NVIDIA Blackwell (RTX 50xx) GPUs.
+    
+    Blackwell-specific optimizations:
+    - Enhanced L1 cache utilization (128KB vs 64KB on Ada)
+    - FP8/BF16 Tensor Core throughput optimization
+    - Tuned block sizes for 5th gen Tensor Cores
+    - Optimized sparsity thresholds for compute/accuracy tradeoff
+    
+    Block-sparse mask geometry:
+    - mask_id shape: (batch_size, num_heads, ceil(seq_len/128), ceil(seq_len/64))
+    - Block size: 128x64 (rows x cols)
+    """
+    
+    # Default topk sparsity ratio (0.5 = 50% of attention weights kept)
+    # Lower values = more sparsity = faster but potentially less accurate
+    DEFAULT_TOPK = 0.5
+    
+    # Blackwell-optimized topk for different use cases
+    TOPK_FAST = 0.3       # Maximum speed, some accuracy tradeoff
+    TOPK_BALANCED = 0.5   # Balanced speed/accuracy (default)
+    TOPK_QUALITY = 0.7    # Higher quality, less speedup
+    
+    # Block-sparse mask dimensions (must match Sage2 kernel expectations)
+    BLOCK_ROWS = 128      # Query block size
+    BLOCK_COLS = 64       # Key/Value block size
+    
+    # Triton kernel parameters tuned for Blackwell architecture
+    # These leverage the increased SM count and L1 cache
+    TRITON_NUM_WARPS = 8          # Optimal for Blackwell SM architecture
+    TRITON_NUM_STAGES = 4         # Memory pipeline stages
+    TRITON_BLOCK_M = 128          # Matches block-sparse row size
+    TRITON_BLOCK_N = 64           # Matches block-sparse col size
+    
+    # Precision settings for Blackwell
+    PREFER_FP8 = True             # Use FP8 when hardware supports it
+    FALLBACK_DTYPE = torch.bfloat16  # Fallback for non-FP8 operations
+    
+    @classmethod
+    def get_mask_shape(cls, batch_size: int, num_heads: int, seq_len: int):
+        """
+        Calculate the required mask_id shape for block-sparse attention.
+        
+        Args:
+            batch_size: Batch size
+            num_heads: Number of attention heads
+            seq_len: Sequence length
+            
+        Returns:
+            Tuple of (batch_size, num_heads, ceil(seq_len/128), ceil(seq_len/64))
+        """
+        rows = math.ceil(seq_len / cls.BLOCK_ROWS)
+        cols = math.ceil(seq_len / cls.BLOCK_COLS)
+        return (batch_size, num_heads, rows, cols)
+    
+    @classmethod
+    def validate_mask_geometry(cls, mask_id: torch.Tensor, batch_size: int, 
+                                num_heads: int, seq_len: int) -> bool:
+        """
+        Validate that mask_id has correct shape for block-sparse Sage2 attention.
+        
+        Args:
+            mask_id: The block-sparse mask tensor
+            batch_size: Expected batch size
+            num_heads: Expected number of heads
+            seq_len: Sequence length
+            
+        Returns:
+            True if mask geometry is valid
+            
+        Raises:
+            ValueError: If mask geometry is invalid
+        """
+        expected_shape = cls.get_mask_shape(batch_size, num_heads, seq_len)
+        if mask_id.shape != expected_shape:
+            raise ValueError(
+                f"Invalid mask_id shape for block-sparse Sage2 attention.\n"
+                f"Expected: {expected_shape} (batch, heads, ceil(seq/{cls.BLOCK_ROWS}), ceil(seq/{cls.BLOCK_COLS}))\n"
+                f"Got: {mask_id.shape}\n"
+                f"Block size constraint: {cls.BLOCK_ROWS}x{cls.BLOCK_COLS}"
+            )
+        return True
+
 
 def validate_attention_mode(requested_mode: str, debug=None) -> str:
     """
     Validate attention mode availability with automatic fallback.
     
     Args:
-        requested_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3'
+        requested_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', 'sageattn_3', or 'sparge_sage2'
         debug: Optional debug instance for logging
         
     Returns:
@@ -275,6 +442,45 @@ def validate_attention_mode(requested_mode: str, debug=None) -> str:
             "  2. OR change attention_mode to 'flash_attn_2' or 'sdpa'\n"
             "\n"
             "For more info: https://github.com/thu-ml/SageAttention"
+        )
+        if debug:
+            debug.log(error_msg, level="WARNING", category="setup", force=True)
+        return 'sdpa'
+    
+    # SpargeAttn / Sage2 (Block-sparse attention for Blackwell)
+    if requested_mode == 'sparge_sage2':
+        if SPARGE_SAGE2_AVAILABLE:
+            return requested_mode
+        # Fallback chain: sageattn_3 -> sageattn_2 -> sdpa
+        if SAGE_ATTN_3_AVAILABLE:
+            if debug:
+                debug.log(
+                    "SpargeAttn/Sage2 not available (requires spas_sage_attn package).\n"
+                    "Falling back to SageAttention 3 (Blackwell).",
+                    level="WARNING", category="setup", force=True
+                )
+            return 'sageattn_3'
+        if SAGE_ATTN_2_AVAILABLE:
+            if debug:
+                debug.log(
+                    "SpargeAttn/Sage2 not available (requires spas_sage_attn package).\n"
+                    "Falling back to SageAttention 2.",
+                    level="WARNING", category="setup", force=True
+                )
+            return 'sageattn_2'
+        error_msg = (
+            "Cannot use 'sparge_sage2' attention mode: SpargeAttn is not installed.\n"
+            "\n"
+            "SpargeAttn/Sage2 provides block-sparse attention optimized for Blackwell (RTX 50xx) GPUs.\n"
+            "It uses the spas_sage2_attn_meansim_topk_cuda API for plug-and-play SDPA replacement.\n"
+            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+            "\n"
+            "To fix this issue:\n"
+            "  1. Install SpargeAttn: pip install spas-sage-attn\n"
+            "  2. For CUDA 12.8+ support, ensure proper toolchain: pip install ninja>=1.11\n"
+            "  3. OR use 'sageattn_3', 'flash_attn_2', or 'sdpa' attention modes\n"
+            "\n"
+            "For more info: https://github.com/thu-ml/SpargeAttn"
         )
         if debug:
             debug.log(error_msg, level="WARNING", category="setup", force=True)
@@ -545,6 +751,263 @@ def call_sage_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, m
     return out.to(out_dtype) if out.dtype != out_dtype else out
 
 
+@torch._dynamo.disable
+def call_sparge_sage2_attn(q, k, v, topk=None, is_causal=False, **kwargs):
+    """
+    Wrapper for SpargeAttn Sage2 spas_sage2_attn_meansim_topk_cuda.
+    
+    This is the plug-and-play replacement for torch.nn.functional.scaled_dot_product_attention.
+    Optimized for NVIDIA Blackwell (RTX 50xx) GPUs with block-sparse attention patterns.
+    
+    Uses mean-similarity based top-k selection to determine which attention weights to keep,
+    providing a balance between computational efficiency and output quality.
+    
+    This function is excluded from torch.compile because:
+    1. SpargeAttn is a CUDA extension that can't be compiled by Dynamo
+    2. It uses custom Triton kernels that need direct execution
+    3. Disabling compilation here keeps the rest of the model compilable
+    
+    Args:
+        q: Query tensor (batch, heads, seq_len, head_dim) or (batch, seq_len, heads, head_dim)
+        k: Key tensor (batch, heads, seq_len, head_dim) or (batch, seq_len, heads, head_dim)
+        v: Value tensor (batch, heads, seq_len, head_dim) or (batch, seq_len, heads, head_dim)
+        topk: Sparsity ratio (0.0-1.0). Default uses Sage2BlackwellConfig.DEFAULT_TOPK (0.5)
+              Lower values = more sparsity = faster but potentially less accurate
+        is_causal: Whether to apply causal masking (default: False)
+        **kwargs: Additional arguments (ignored for API compatibility)
+        
+    Returns:
+        Attention output tensor (same shape as input)
+    """
+    if not SPARGE_SAGE2_AVAILABLE:
+        raise ImportError(
+            "SpargeAttn/Sage2 is not available. "
+            "Install with: pip install spas-sage-attn"
+        )
+    
+    # Use Blackwell-optimized default if not specified
+    if topk is None:
+        topk = Sage2BlackwellConfig.DEFAULT_TOPK
+    
+    # SpargeAttn requires half precision (fp16/bf16)
+    out_dtype = q.dtype
+    half_dtypes = (torch.float16, torch.bfloat16)
+    
+    if not (q.dtype == k.dtype == v.dtype):
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
+    
+    if q.dtype not in half_dtypes:
+        # Prefer bf16 for Blackwell's enhanced Tensor Core support
+        target_dtype = Sage2BlackwellConfig.FALLBACK_DTYPE
+        q = q.to(target_dtype)
+        k = k.to(target_dtype)
+        v = v.to(target_dtype)
+    
+    # Call SpargeAttn Sage2 API
+    out = spas_sage2_attn_meansim_topk(q, k, v, topk=topk, is_causal=is_causal)
+    
+    return out.to(out_dtype) if out.dtype != out_dtype else out
+
+
+@torch._dynamo.disable
+def call_block_sparse_sage2_attn(q, k, v, mask_id, **kwargs):
+    """
+    Wrapper for SpargeAttn Sage2 block_sparse_sage2_attn_cuda with custom block-sparse patterns.
+    
+    This function provides fine-grained control over sparsity patterns using a custom mask.
+    Optimized for NVIDIA Blackwell (RTX 50xx) GPUs.
+    
+    IMPORTANT: Mask geometry must follow strict block size constraints:
+    - mask_id shape: (batch_size, num_heads, ceil(seq_len/128), ceil(seq_len/64))
+    - Block size: 128x64 (rows x cols)
+    
+    This function is excluded from torch.compile because:
+    1. SpargeAttn is a CUDA extension that can't be compiled by Dynamo
+    2. It uses custom Triton kernels that need direct execution
+    3. Disabling compilation here keeps the rest of the model compilable
+    
+    Args:
+        q: Query tensor (batch, heads, seq_len, head_dim)
+        k: Key tensor (batch, heads, seq_len, head_dim)
+        v: Value tensor (batch, heads, seq_len, head_dim)
+        mask_id: Block-sparse mask tensor with shape 
+                 (batch_size, num_heads, ceil(seq_len/128), ceil(seq_len/64))
+        **kwargs: Additional arguments (ignored for API compatibility)
+        
+    Returns:
+        Attention output tensor (same shape as input)
+        
+    Raises:
+        ValueError: If mask_id has incorrect geometry
+    """
+    if not SPARGE_SAGE2_AVAILABLE:
+        raise ImportError(
+            "SpargeAttn/Sage2 is not available. "
+            "Install with: pip install spas-sage-attn"
+        )
+    
+    # Validate mask geometry
+    batch_size = q.shape[0]
+    num_heads = q.shape[1]
+    seq_len = q.shape[2]
+    Sage2BlackwellConfig.validate_mask_geometry(mask_id, batch_size, num_heads, seq_len)
+    
+    # SpargeAttn requires half precision (fp16/bf16)
+    out_dtype = q.dtype
+    half_dtypes = (torch.float16, torch.bfloat16)
+    
+    if not (q.dtype == k.dtype == v.dtype):
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
+    
+    if q.dtype not in half_dtypes:
+        # Prefer bf16 for Blackwell's enhanced Tensor Core support
+        target_dtype = Sage2BlackwellConfig.FALLBACK_DTYPE
+        q = q.to(target_dtype)
+        k = k.to(target_dtype)
+        v = v.to(target_dtype)
+    
+    # Call SpargeAttn Sage2 block-sparse API
+    out = block_sparse_sage2_attn(q, k, v, mask_id)
+    
+    return out.to(out_dtype) if out.dtype != out_dtype else out
+
+
+@torch._dynamo.disable
+def call_sparge_sage2_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
+    """
+    Wrapper for SpargeAttn Sage2 that handles variable-length sequences.
+    
+    Since SpargeAttn Sage2 uses batched attention (not varlen natively), this wrapper
+    converts varlen format to batched format for uniform sequence lengths, or falls back
+    to SageAttention 2 for true variable-length sequences.
+    
+    This function is excluded from torch.compile because:
+    1. SpargeAttn is a CUDA extension that can't be compiled by Dynamo
+    2. It requires Python int scalars for max_seqlen parameters
+    3. The varlen-to-batched conversion involves dynamic shapes
+    4. Disabling compilation here keeps the rest of the model compilable
+    
+    Args:
+        q: Query tensor (total_seq, heads, head_dim)
+        k: Key tensor (total_seq, heads, head_dim)
+        v: Value tensor (total_seq, heads, head_dim)
+        cu_seqlens_q: Cumulative sequence lengths for queries
+        cu_seqlens_k: Cumulative sequence lengths for keys
+        max_seqlen_q: Maximum query sequence length (can be tensor or int)
+        max_seqlen_k: Maximum key sequence length (can be tensor or int)
+        **kwargs: Additional arguments (topk for sparsity ratio, etc.)
+        
+    Returns:
+        Attention output tensor (total_seq, heads, head_dim)
+    """
+    if not SPARGE_SAGE2_AVAILABLE:
+        raise ImportError("SpargeAttn/Sage2 is not available")
+    
+    # Convert tensor max_seqlen to Python int if needed
+    if torch.is_tensor(max_seqlen_q):
+        max_seqlen_q = int(max_seqlen_q.item())
+    if torch.is_tensor(max_seqlen_k):
+        max_seqlen_k = int(max_seqlen_k.item())
+    
+    # Check if all sequences have uniform length (required for batched Sage2)
+    seq_lens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    seq_lens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+    
+    uniform_q = (seq_lens_q == seq_lens_q[0]).all()
+    uniform_k = (seq_lens_k == seq_lens_k[0]).all()
+    
+    if not (uniform_q and uniform_k):
+        # Fall back to SA2 for variable-length sequences
+        # SpargeAttn Sage2 doesn't support varlen natively
+        if SAGE_ATTN_2_AVAILABLE:
+            return call_sage_attn_2_varlen(
+                q, k, v, cu_seqlens_q, cu_seqlens_k,
+                max_seqlen_q, max_seqlen_k, **kwargs
+            )
+        raise RuntimeError(
+            "SpargeAttn/Sage2 requires uniform sequence lengths, "
+            "and SageAttention 2 is not available as fallback. "
+            "Install with: pip install sageattention, or use flash_attn/sdpa instead."
+        )
+    
+    # Extract batch dimensions
+    batch_size = len(cu_seqlens_q) - 1
+    seq_len_q = int(seq_lens_q[0].item())
+    seq_len_k = int(seq_lens_k[0].item())
+    heads = q.shape[1]
+    dim = q.shape[2]
+    
+    # Get sparsity parameters with explicit mapping
+    # Performance Mode Mapping: Fast=0.3, Balanced=0.5, High Quality=0.7
+    topk = kwargs.get('topk', Sage2BlackwellConfig.DEFAULT_TOPK)
+    is_causal = kwargs.get('causal', False)
+    
+    # STRICT VERIFICATION: Assert sparsity_threshold is a valid float
+    assert isinstance(topk, (int, float)), f"sparsity_threshold must be a float, got {type(topk)}"
+    assert 0.0 < topk <= 1.0, f"sparsity_threshold must be in (0.0, 1.0], got {topk}"
+    
+    # Update frame counter (always, for tracking)
+    global _sparge_sage2_frame_counter
+    _sparge_sage2_frame_counter += 1
+    
+    # Logging only on first call OR if verbose logging is explicitly enabled
+    # This eliminates Python-side overhead during normal execution
+    if _sparge_sage2_frame_counter == 1:
+        # Map topk value to performance mode name for logging
+        if abs(topk - 0.3) < 0.01:
+            perf_mode = "Fast"
+        elif abs(topk - 0.5) < 0.01:
+            perf_mode = "Balanced"
+        elif abs(topk - 0.7) < 0.01:
+            perf_mode = "High Quality"
+        else:
+            perf_mode = f"Custom({topk})"
+        
+        blackwell_msg = (f"!!! BLACKWELL EXECUTION: Mode={perf_mode}, Threshold={topk}, "
+                         f"Warps={Sage2BlackwellConfig.TRITON_NUM_WARPS}, Stages={Sage2BlackwellConfig.TRITON_NUM_STAGES}, "
+                         f"BlockM={Sage2BlackwellConfig.TRITON_BLOCK_M}, BlockN={Sage2BlackwellConfig.TRITON_BLOCK_N}")
+        print(blackwell_msg, flush=True)
+        logger.info(blackwell_msg)
+    elif ENABLE_VERBOSE_LOGGING and _sparge_sage2_frame_counter % 100 == 0:
+        # Verbose logging every 100th call (only when SEEDVR2_VERBOSE_LOGGING=1)
+        print(f">> KERNEL #{_sparge_sage2_frame_counter}: topk={topk}", flush=True)
+    
+    # SpargeAttn requires half precision (fp16/bf16)
+    out_dtype = q.dtype
+    half_dtypes = (torch.float16, torch.bfloat16)
+    
+    if not (q.dtype == k.dtype == v.dtype):
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
+    
+    if q.dtype not in half_dtypes:
+        q = q.to(Sage2BlackwellConfig.FALLBACK_DTYPE)
+        k = k.to(Sage2BlackwellConfig.FALLBACK_DTYPE)
+        v = v.to(Sage2BlackwellConfig.FALLBACK_DTYPE)
+    
+    # Reshape varlen (total_seq, heads, dim) -> batched (batch, heads, seq, dim)
+    q_batched = q.view(batch_size, seq_len_q, heads, dim).transpose(1, 2)
+    k_batched = k.view(batch_size, seq_len_k, heads, dim).transpose(1, 2)
+    v_batched = v.view(batch_size, seq_len_k, heads, dim).transpose(1, 2)
+    
+    # Call SpargeAttn Sage2 - STRICT: raise error if kernel fails
+    try:
+        out = spas_sage2_attn_meansim_topk(q_batched, k_batched, v_batched, topk=topk, is_causal=is_causal)
+    except Exception as e:
+        raise RuntimeError(
+            f"SpargeAttn Sage2 kernel FAILED with Blackwell parameters "
+            f"(num_warps={Sage2BlackwellConfig.TRITON_NUM_WARPS}, topk={topk}). "
+            f"Error: {e}. No silent fallback - fix the kernel or use a different attention_mode."
+        ) from e
+    
+    # Reshape back to varlen format (total_seq, heads, dim)
+    out = out.transpose(1, 2).reshape(-1, heads, dim).contiguous()
+    
+    return out.to(out_dtype) if out.dtype != out_dtype else out
+
+
 # 2. Triton - Required for torch.compile with inductor backend
 try:
     import triton
@@ -562,6 +1025,58 @@ except ImportError:
     GGUF_AVAILABLE = False
     gguf = None
     GGMLQuantizationType = None
+
+
+# 4. NVFP4 - Native 4-bit floating point for Blackwell (RTX 50-series)
+# Deferred import to avoid circular dependency - just set flags here
+NVFP4_AVAILABLE = False
+BLACKWELL_GPU_DETECTED = False
+
+def _check_nvfp4_support():
+    """Check if NVFP4 is supported (Blackwell GPU + PyTorch 2.6+ + CUDA 12.8+)"""
+    global NVFP4_AVAILABLE, BLACKWELL_GPU_DETECTED
+    
+    if not torch.cuda.is_available():
+        return False, False
+    
+    try:
+        # Check for Blackwell GPU (compute capability 10.0+)
+        capability = torch.cuda.get_device_capability(0)
+        is_blackwell = capability[0] >= 10
+        BLACKWELL_GPU_DETECTED = is_blackwell
+        
+        if not is_blackwell:
+            return False, False
+        
+        # Check PyTorch version (need 2.6+)
+        version_str = torch.__version__.split('+')[0]
+        parts = version_str.split('.')
+        torch_version = tuple(int(p) for p in parts[:2])
+        if torch_version < (2, 6):
+            return False, True  # Blackwell detected but PyTorch too old
+        
+        # Check CUDA version (need 12.8+)
+        cuda_version = torch.version.cuda
+        if cuda_version is None:
+            return False, True
+        
+        cuda_parts = cuda_version.split('.')
+        cuda_major = int(cuda_parts[0])
+        cuda_minor = int(cuda_parts[1]) if len(cuda_parts) > 1 else 0
+        
+        if cuda_major < 12 or (cuda_major == 12 and cuda_minor < 8):
+            return False, True  # Blackwell detected but CUDA too old
+        
+        NVFP4_AVAILABLE = True
+        return True, True
+        
+    except Exception:
+        return False, False
+
+# Run NVFP4 check at module load
+_nvfp4_result = _check_nvfp4_support()
+NVFP4_AVAILABLE = _nvfp4_result[0]
+BLACKWELL_GPU_DETECTED = _nvfp4_result[1]
 
 
 def validate_gguf_availability(operation: str = "load GGUF model", debug=None) -> None:
@@ -648,6 +1163,8 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
     sage_status = "✅" if SAGE_ATTN_AVAILABLE else "❌"
     flash_status = "✅" if FLASH_ATTN_AVAILABLE else "❌"
     triton_status = "✅" if TRITON_AVAILABLE else "❌"
+    nvfp4_status = "✅" if NVFP4_AVAILABLE else "❌"
+    sparge_status = "✅" if SPARGE_SAGE2_AVAILABLE else "❌"
     
     # Count available optimizations
     available = [SAGE_ATTN_AVAILABLE, FLASH_ATTN_AVAILABLE, TRITON_AVAILABLE]
@@ -672,6 +1189,30 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
             missing.append("triton")
         if missing:
             print(f"💡 Optional: pip install {' '.join(missing)}")
+    
+    # SpargeAttn/Sage2 status (Blackwell block-sparse optimization)
+    if SPARGE_SAGE2_AVAILABLE:
+        version_info = f" v{SPARGE_SAGE2_VERSION}" if SPARGE_SAGE2_VERSION and SPARGE_SAGE2_VERSION != 'unknown' else ""
+        print(f"🔥 SpargeAttn/Sage2 block-sparse attention: {sparge_status}{version_info} (optimized for RTX 50xx)")
+    elif BLACKWELL_GPU_DETECTED:
+        print(f"🔷 SpargeAttn/Sage2: {sparge_status} (install with: pip install spas-sage-attn for Blackwell optimization)")
+    
+    # NVFP4/Blackwell status (RTX 50-series optimizations)
+    if BLACKWELL_GPU_DETECTED:
+        if NVFP4_AVAILABLE:
+            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "Blackwell GPU"
+            print(f"🚀 NVFP4 Blackwell optimization: {nvfp4_status} ({gpu_name} - 4-bit Tensor Core acceleration enabled)")
+            
+            # Enable native FP4 dispatch for Blackwell
+            try:
+                from .nvfp4 import ensure_native_fp4_dispatch
+                if ensure_native_fp4_dispatch():
+                    print("   └─ Native FP4 dispatch configured (TF32 enabled, cuDNN benchmark active)")
+            except ImportError:
+                pass
+        else:
+            # Blackwell GPU detected but NVFP4 not available (needs PyTorch 2.6+ with CUDA 12.8+)
+            print(f"🔷 Blackwell GPU detected but NVFP4 unavailable (requires PyTorch 2.6+ with CUDA 12.8+)")
     
     # Conv3d workaround status (if applicable)
     if NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND:

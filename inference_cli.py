@@ -1446,8 +1446,8 @@ Examples:
     # Performance
     perf_group = parser.add_argument_group('Performance optimization')
     perf_group.add_argument("--attention_mode", type=str, default="sdpa",
-                        choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
-                        help="Attention backend: 'sdpa' (default), 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3' (Blackwell GPUs)")
+                        choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3", "sparge_sage2"],
+                        help="Attention backend: 'sdpa' (default), 'flash_attn_2', 'flash_attn_3', 'sageattn_2', 'sageattn_3' (Blackwell GPUs), or 'sparge_sage2' (block-sparse, Blackwell optimized)")
     perf_group.add_argument("--compile_dit", action="store_true", 
                         help="Enable torch.compile for DiT model (20-40%% speedup, requires PyTorch 2.0+ and Triton)")
     perf_group.add_argument("--compile_vae", action="store_true",

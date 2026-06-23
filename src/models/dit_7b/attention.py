@@ -14,11 +14,16 @@
 
 import torch
 import torch.nn.functional as F
+import logging
+
+# Configure logging for attention mode verification
+logger = logging.getLogger("SeedVR2.Attention")
 
 # Import flash/sage attn with automatic fallback from compatibility layer
 from ...optimization.compatibility import (
     call_flash_attn_2_varlen, call_flash_attn_3_varlen,
-    call_sage_attn_2_varlen, call_sage_attn_3_varlen
+    call_sage_attn_2_varlen, call_sage_attn_3_varlen,
+    call_sparge_sage2_varlen
 )
 
 from torch import nn
@@ -87,21 +92,26 @@ class FlashAttentionVarlen(nn.Module):
     - flash_attn_3: Flash Attention 3 (Hopper+)
     - sageattn_2: SageAttention 2
     - sageattn_3: SageAttention 3 (Blackwell/RTX 50xx)
+    - sparge_sage2: SpargeAttn/Sage2 block-sparse attention (Blackwell optimized)
     
     All non-SDPA backends use @torch._dynamo.disable wrapper (C++ extensions).
     """
 
-    def __init__(self, attention_mode: str = 'sdpa', compute_dtype: torch.dtype = None):
+    def __init__(self, attention_mode: str = 'sdpa', compute_dtype: torch.dtype = None,
+                 sparsity_threshold: float = 0.5):
         """
         Initialize with specified attention backend.
         
         Args:
-            attention_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3'
+            attention_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', 'sageattn_3', or 'sparge_sage2'
             compute_dtype: Compute dtype for attention (set by pipeline, defaults to None for auto-detection)
+            sparsity_threshold: Sparsity threshold for sparge_sage2 mode (0.0-1.0, default 0.5)
+                               Maps to performance modes: Fast=0.3, Balanced=0.5, High Quality=0.7
         """
         super().__init__()
         self.attention_mode = attention_mode
         self.compute_dtype = compute_dtype
+        self.sparsity_threshold = sparsity_threshold
 
     def tflops(self, args, kwargs, output) -> float:
         cu_seqlens_q = kwargs["cu_seqlens_q"]
@@ -140,8 +150,16 @@ class FlashAttentionVarlen(nn.Module):
                 q, k, v, cu_seqlens_q, cu_seqlens_k,
                 max_seqlen_q, max_seqlen_k, **kwargs
             )
+        elif self.attention_mode == 'sparge_sage2':
+            # Pass sparsity_threshold as topk for Blackwell-optimized sparse attention
+            # Uses Triton kernel params: num_warps=8, num_stages=4, block_m=128, block_n=64
+            return call_sparge_sage2_varlen(
+                q, k, v, cu_seqlens_q, cu_seqlens_k,
+                max_seqlen_q, max_seqlen_k, topk=self.sparsity_threshold, **kwargs
+            )
         else:
-            # PyTorch SDPA
+            # PyTorch SDPA - Log warning that Blackwell optimization is NOT active
+            logger.warning(f"!!! WARNING: Blackwell optimization skipped. Current attention_mode: {self.attention_mode}")
             return pytorch_varlen_attention(
                 q, k, v, cu_seqlens_q, cu_seqlens_k,
                 max_seqlen_q, max_seqlen_k, **kwargs

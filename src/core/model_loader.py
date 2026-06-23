@@ -65,7 +65,9 @@ from ..common.config import create_object
 from ..optimization.compatibility import (
     GGUF_AVAILABLE,
     GGMLQuantizationType,
-    validate_gguf_availability
+    validate_gguf_availability,
+    NVFP4_AVAILABLE,
+    BLACKWELL_GPU_DETECTED
 )
 
 # GGUF-specific imports (only when available)
@@ -75,6 +77,14 @@ if GGUF_AVAILABLE:
     from ..optimization.gguf_dequant import dequantize_tensor
     from ..optimization.gguf_ops import replace_linear_with_quantized
 
+# NVFP4-specific imports (only when available)
+from ..optimization.nvfp4 import (
+    is_nvfp4_checkpoint,
+    load_nvfp4_weights,
+    NVFP4Config,
+    should_preserve_precision
+)
+
 from ..utils.constants import get_script_directory, suppress_tensor_warnings
 
 # Get script directory for config paths
@@ -82,17 +92,19 @@ script_directory = get_script_directory()
 
 
 def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch.device("cpu"),
-                              debug: Optional['Debug'] = None) -> Dict[str, torch.Tensor]:
+                              debug: Optional['Debug'] = None, 
+                              nvfp4_enabled: bool = True) -> Dict[str, torch.Tensor]:
     """
     Load model state dict from checkpoint with support for multiple formats.
     
     Handles .safetensors, .gguf, and .pth files. GGUF models support quantization
-    for memory-efficient loading. Validates required libraries are installed.
+    for memory-efficient loading. NVFP4 support for Blackwell GPUs.
     
     Args:
         checkpoint_path: Path to checkpoint file
         device: Target device for tensor placement (torch.device object, defaults to CPU)
         debug: Optional Debug instance for logging
+        nvfp4_enabled: Whether to enable NVFP4 processing for Blackwell GPUs
         
     Returns:
         dict: State dictionary loaded with appropriate format handler
@@ -100,8 +112,16 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
     Notes:
         - SafeTensors files use optimized loading with direct device placement
         - PyTorch files use memory-mapped loading to reduce RAM usage
+        - NVFP4 weights are automatically detected and wrapped for Blackwell optimization
     """
     device_str = str(device)
+    
+    # Check if this is an NVFP4 checkpoint on Blackwell hardware
+    is_nvfp4_model = nvfp4_enabled and NVFP4_AVAILABLE and is_nvfp4_checkpoint(checkpoint_path)
+    
+    if is_nvfp4_model and debug:
+        debug.log(f"Detected NVFP4 checkpoint on Blackwell GPU - enabling 4-bit optimization", 
+                 category="nvfp4", force=True)
     
     if checkpoint_path.endswith('.safetensors'):
         if not SAFETENSORS_AVAILABLE:
@@ -137,6 +157,11 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
             else:
                 # Re-raise if it's a different error (file corruption, etc.)
                 raise
+        
+        # Process NVFP4 weights if applicable
+        if is_nvfp4_model:
+            state = load_nvfp4_weights(state, config=NVFP4Config(), debug=debug)
+            
     elif checkpoint_path.endswith('.gguf'):
         validate_gguf_availability(f"load {os.path.basename(checkpoint_path)}", debug)
         state = _load_gguf_state(

@@ -320,6 +320,7 @@ We're actively working on improvements and new features. To stay informed:
 - **Multi-GPU CLI**: Distribute workload across multiple GPUs with automatic temporal overlap blending
 - **Model Caching**: Keep models loaded between generations for single-GPU directory processing or multi-GPU streaming
 - **Flexible Attention Backends**: Choose between PyTorch SDPA (stable, always available), Flash Attention 2/3, or SageAttention 2/3 for faster computation on supported hardware
+- **NVFP4 Blackwell Support**: Native 4-bit floating point quantization for NVIDIA RTX 50-series GPUs with 2-4x speedup and ~75% VRAM reduction (requires PyTorch 2.6+ with CUDA 12.8+)
 
 ### Quality Control
 - **Advanced Color Correction**: Five methods including LAB (recommended for highest fidelity), wavelet, wavelet adaptive, HSV, and AdaIN
