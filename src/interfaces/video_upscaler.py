@@ -28,6 +28,7 @@ from ..optimization.memory_manager import (
     complete_cleanup,
     get_device_list
 )
+from ..optimization.compatibility import reset_sparge_sage2_verification
 
 # Import ComfyUI progress reporting
 try:
@@ -342,6 +343,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
         # OPTIONAL inputs - use .get() with defaults
         dit_cache = dit.get("cache_model", False)
         attention_mode = dit.get("attention_mode", "sdpa")
+        sparsity_threshold = dit.get("sparsity_threshold", 0.5)
         vae_cache = vae.get("cache_model", False)
 
         # BlockSwap configuration - construct from individual values
@@ -432,6 +434,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                 decode_tile_overlap=(decode_tile_overlap, decode_tile_overlap),
                 tile_debug=tile_debug,
                 attention_mode=attention_mode,
+                sparsity_threshold=sparsity_threshold,
                 torch_compile_args_dit=dit_torch_compile_args,
                 torch_compile_args_vae=vae_torch_compile_args
             )
@@ -481,6 +484,9 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                 input_noise_scale=input_noise_scale,
                 color_correction=color_correction
             )
+
+            # MEMORY ISOLATION: Clear CUDA cache and reset kernel counter before DiT phase
+            reset_sparge_sage2_verification()
 
             # Phase 2: Upscale
             ctx = upscale_all_batches(

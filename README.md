@@ -320,6 +320,7 @@ We're actively working on improvements and new features. To stay informed:
 - **Multi-GPU CLI**: Distribute workload across multiple GPUs with automatic temporal overlap blending
 - **Model Caching**: Keep models loaded between generations for single-GPU directory processing or multi-GPU streaming
 - **Flexible Attention Backends**: Choose between PyTorch SDPA (stable, always available), Flash Attention 2/3, or SageAttention 2/3 for faster computation on supported hardware
+- **NVFP4 Blackwell Support**: Native 4-bit floating point quantization for NVIDIA RTX 50-series GPUs with 2-4x speedup and ~75% VRAM reduction (requires PyTorch 2.6+ with CUDA 12.8+)
 
 ### Quality Control
 - **Advanced Color Correction**: Five methods including LAB (recommended for highest fidelity), wavelet, wavelet adaptive, HSV, and AdaIN
@@ -348,7 +349,7 @@ With the current optimizations (tiling, BlockSwap, GGUF quantization), SeedVR2 c
 - **Python**: 3.12+ (Python 3.12 and 3.13 tested and recommended)
 - **PyTorch**: 2.0+ for torch.compile support (optional but recommended)
 - **Triton**: Required for torch.compile with inductor backend (optional)
-- **Flash Attention / SageAttention**: Flash Attention 2 (Ampere+), Flash Attention 3 (Hopper+), SageAttention 2 or SageAttention 3 (Blackwell) provide faster attention computation on supported hardware (optional, falls back to PyTorch SDPA)
+- **Flash Attention / SageAttention**: Flash Attention 2 (Ampere+), Flash Attention 3 (Hopper+), SageAttention 1 (Turing/RTX 20xx), SageAttention 2 or SageAttention 3 (Blackwell) provide faster attention computation on supported hardware (optional, falls back to PyTorch SDPA)
 
 ## 📦 Installation
 
@@ -466,6 +467,7 @@ Configure the DiT (Diffusion Transformer) model for video upscaling.
   - `sdpa`: PyTorch scaled_dot_product_attention (default, always available)
   - `flash_attn_2`: Flash Attention 2 (Ampere+, requires flash-attn package)
   - `flash_attn_3`: Flash Attention 3 (Hopper+, requires flash-attn with FA3 support)
+  - `sageattn_1`: SageAttention 1 (Turing/SM75+, recommended for RTX 20xx / GTX 16xx)
   - `sageattn_2`: SageAttention 2 (requires sageattention package)
   - `sageattn_3`: SageAttention 3 (Blackwell/RTX 50xx, requires sageattn3 package)
 
@@ -931,7 +933,7 @@ python inference_cli.py media_folder/ \
 
 **Performance Optimization:**
 - `--allow_vram_overflow`: Allow VRAM overflow to system RAM. Prevents OOM but may cause severe slowdown
-- `--attention_mode`: Attention backend: 'sdpa' (default), 'flash_attn_2' (Ampere+), 'flash_attn_3' (Hopper+), 'sageattn_2', or 'sageattn_3' (Blackwell)
+- `--attention_mode`: Attention backend: 'sdpa' (default), 'flash_attn_2' (Ampere+), 'flash_attn_3' (Hopper+), 'sageattn_1' (Turing/RTX 20xx), 'sageattn_2', or 'sageattn_3' (Blackwell)
 - `--compile_dit`: Enable torch.compile for DiT model (20-40% speedup, requires PyTorch 2.0+ and Triton)
 - `--compile_vae`: Enable torch.compile for VAE model (15-25% speedup, requires PyTorch 2.0+ and Triton)
 - `--compile_backend`: Compilation backend: 'inductor' (full optimization) or 'cudagraphs' (lightweight) (default: inductor)

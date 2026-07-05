@@ -188,6 +188,30 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     }
     
     return mode_descriptions.get(attention_mode, attention_mode)
+
+
+def _describe_sparsity_threshold(sparsity_threshold: Optional[float]) -> str:
+    """
+    Generate human-readable description of sparsity threshold configuration.
+    
+    Args:
+        sparsity_threshold: Sparsity threshold value (0.0-1.0)
+        
+    Returns:
+        Human-readable description string with performance mode
+    """
+    if sparsity_threshold is None:
+        return "0.5 (Balanced, default)"
+    
+    # Map threshold to performance mode name
+    if abs(sparsity_threshold - 0.3) < 0.01:
+        return f"{sparsity_threshold} (Fast)"
+    elif abs(sparsity_threshold - 0.5) < 0.01:
+        return f"{sparsity_threshold} (Balanced)"
+    elif abs(sparsity_threshold - 0.7) < 0.01:
+        return f"{sparsity_threshold} (High Quality)"
+    else:
+        return f"{sparsity_threshold}"
     
 
 def _describe_tiling_config(encode_tiled: bool, encode_tile_size: Optional[Tuple[int, int]], 
@@ -418,6 +442,7 @@ def _update_dit_config(
     block_swap_config: Optional[Dict[str, Any]],
     torch_compile_args: Optional[Dict[str, Any]],
     attention_mode: Optional[str],
+    sparsity_threshold: float = 0.5,
     debug: Optional['Debug'] = None
 ) -> bool:
     """
@@ -440,6 +465,7 @@ def _update_dit_config(
             - dynamo_cache_size_limit: int - Cache size limit
             - dynamo_recompile_limit: int - Recompilation limit
         attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        sparsity_threshold: Sparsity threshold for sparge_sage2 attention (0.0-1.0, default 0.5)
         debug: Debug instance for logging
         
     Returns:
@@ -452,22 +478,26 @@ def _update_dit_config(
         new_configs={
             'torch_compile': torch_compile_args,
             'block_swap': block_swap_config,
-            'attention_mode': attention_mode
+            'attention_mode': attention_mode,
+            'sparsity_threshold': sparsity_threshold
         },
         cached_config_attrs={
             'torch_compile': '_dit_compile_args',
             'block_swap': '_dit_block_swap_config',
-            'attention_mode': '_dit_attention_mode'
+            'attention_mode': '_dit_attention_mode',
+            'sparsity_threshold': '_dit_sparsity_threshold'
         },
         model_config_attrs={
             'torch_compile': '_config_compile',
             'block_swap': '_config_swap',
-            'attention_mode': '_config_attn'
+            'attention_mode': '_config_attn',
+            'sparsity_threshold': '_config_sparsity'
         },
         config_describers={
             'torch_compile': _describe_compile_config,
             'block_swap': _describe_blockswap_config,
-            'attention_mode': _describe_attention_mode
+            'attention_mode': _describe_attention_mode,
+            'sparsity_threshold': _describe_sparsity_threshold
         },
         special_handlers={
             'block_swap': _handle_blockswap_change
@@ -748,6 +778,7 @@ def configure_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
+    sparsity_threshold: float = 0.5,
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
     torch_compile_args_vae: Optional[Dict[str, Any]] = None
 ) -> Tuple[VideoDiffusionInfer, Dict[str, Any]]:
@@ -775,6 +806,8 @@ def configure_runner(
         decode_tile_overlap: Tile overlap for decoding (height, width)
         tile_debug: Tile visualization mode (false/encode/decode)
         attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        sparsity_threshold: Sparsity threshold for sparge_sage2 attention (0.0-1.0, default 0.5)
+                           Maps to performance modes: Fast=0.3, Balanced=0.5, High Quality=0.7
         torch_compile_args_dit: Optional torch.compile configuration for DiT model
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
         
@@ -820,7 +853,7 @@ def configure_runner(
         runner, ctx,
         encode_tiled, encode_tile_size, encode_tile_overlap,
         decode_tiled, decode_tile_size, decode_tile_overlap,
-        tile_debug, attention_mode,
+        tile_debug, attention_mode, sparsity_threshold,
         torch_compile_args_dit, torch_compile_args_vae,
         block_swap_config, debug
     )
@@ -845,6 +878,7 @@ def _configure_runner_settings(
     decode_tile_overlap: Optional[Tuple[int, int]],
     tile_debug: str,
     attention_mode: str,
+    sparsity_threshold: float,
     torch_compile_args_dit: Optional[Dict[str, Any]],
     torch_compile_args_vae: Optional[Dict[str, Any]],
     block_swap_config: Optional[Dict[str, Any]],
@@ -869,6 +903,8 @@ def _configure_runner_settings(
         decode_tile_overlap: Overlap dimensions (height, width) between decoding tiles
         tile_debug: Tile visualization mode (false/encode/decode)
         attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
+        sparsity_threshold: Sparsity threshold for sparge_sage2 attention (0.0-1.0)
+                           Maps to performance modes: Fast=0.3, Balanced=0.5, High Quality=0.7
         torch_compile_args_dit: torch.compile configuration for DiT model or None
         torch_compile_args_vae: torch.compile configuration for VAE model or None
         block_swap_config: BlockSwap configuration for DiT model or None
@@ -889,6 +925,7 @@ def _configure_runner_settings(
     runner._new_vae_compile_args = torch_compile_args_vae
     runner._new_dit_block_swap_config = block_swap_config
     runner._new_dit_attention_mode = attention_mode
+    runner._new_dit_sparsity_threshold = sparsity_threshold
     runner._new_vae_tiling_config = {
         'encode_tiled': encode_tiled,
         'encode_tile_size': encode_tile_size,
@@ -952,17 +989,20 @@ def _setup_models(
     # Only update DiT config if model was cached/reused (not newly created)
     if not dit_created and hasattr(runner, 'dit') and runner.dit is not None:
         _update_dit_config(runner, runner._new_dit_block_swap_config, 
-                         runner._new_dit_compile_args, runner._new_dit_attention_mode, debug)
+                         runner._new_dit_compile_args, runner._new_dit_attention_mode,
+                         runner._new_dit_sparsity_threshold, debug)
     elif dit_created:
         # For newly created models, just set initial config attributes (no comparison needed)
         runner._dit_compile_args = runner._new_dit_compile_args
         runner._dit_block_swap_config = runner._new_dit_block_swap_config
         runner._dit_attention_mode = runner._new_dit_attention_mode
+        runner._dit_sparsity_threshold = runner._new_dit_sparsity_threshold
         # Also store on model so config travels with the model when cached
         if hasattr(runner, 'dit') and runner.dit:
             runner.dit._config_compile = runner._new_dit_compile_args
             runner.dit._config_swap = runner._new_dit_block_swap_config
             runner.dit._config_attn = runner._new_dit_attention_mode
+            runner.dit._config_sparsity = runner._new_dit_sparsity_threshold
     
     # Setup VAE
     vae_created = _setup_vae_model(runner, cache_context, vae_model, base_cache_dir, debug)
@@ -980,7 +1020,7 @@ def _setup_models(
             runner.vae._config_tiling = runner._new_vae_tiling_config
     
     # Clean up temporary attributes
-    for attr in ['_new_dit_compile_args', '_new_vae_compile_args', '_new_dit_block_swap_config', '_new_dit_attention_mode', '_new_vae_tiling_config']:
+    for attr in ['_new_dit_compile_args', '_new_vae_compile_args', '_new_dit_block_swap_config', '_new_dit_attention_mode', '_new_dit_sparsity_threshold', '_new_vae_tiling_config']:
         if hasattr(runner, attr):
             delattr(runner, attr)
     
@@ -1037,6 +1077,7 @@ def _setup_dit_model(
         runner._dit_compile_args = getattr(runner.dit, '_config_compile', None)
         runner._dit_block_swap_config = getattr(runner.dit, '_config_swap', None)
         runner._dit_attention_mode = getattr(runner.dit, '_config_attn', None)
+        runner._dit_sparsity_threshold = getattr(runner.dit, '_config_sparsity', 0.5)
         
         # blockswap_active will be set by apply_block_swap_to_dit
         # when the model is materialized to the inference device
@@ -1195,7 +1236,11 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
             attention_mode = validate_attention_mode(requested_attention_mode, debug)
             
             # Get compute_dtype from runner
-            compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)            
+            compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
+            
+            # Get sparsity_threshold from runner (for sparge_sage2 performance mode)
+            sparsity_threshold = getattr(runner, '_dit_sparsity_threshold', 0.5)
+            
             debug.log(f"Applying {attention_mode} attention mode and {compute_dtype} compute dtype to model", category="setup")
             
             # Get the actual model (unwrap if needed)
@@ -1207,10 +1252,17 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
                 if type(module).__name__ == 'FlashAttentionVarlen':
                     module.attention_mode = attention_mode
                     module.compute_dtype = compute_dtype
+                    module.sparsity_threshold = sparsity_threshold
                     updated_count += 1
             
             if updated_count > 0:
                 debug.log(f"Applied {attention_mode} and compute_dtype={compute_dtype} to {updated_count} modules", category="success")
+                if attention_mode == 'sparge_sage2':
+                    # Log sparsity threshold for sparge_sage2 mode (Blackwell-optimized)
+                    mode_name = "Fast" if abs(sparsity_threshold - 0.3) < 0.01 else \
+                                "Balanced" if abs(sparsity_threshold - 0.5) < 0.01 else \
+                                "High Quality" if abs(sparsity_threshold - 0.7) < 0.01 else "Custom"
+                    debug.log(f"Sparsity threshold: {sparsity_threshold} ({mode_name})", category="setup")
 
         # Apply BlockSwap before torch.compile (only if not already active)
         # BlockSwap wraps forward methods, and torch.compile needs to capture the wrapped version

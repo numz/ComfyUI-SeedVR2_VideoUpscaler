@@ -2,6 +2,19 @@
 Memory management module for SeedVR2
 Handles VRAM usage, cache management, and memory optimization
 
+Key Features:
+- Unified tensor management with device/dtype handling
+- Async transfer support with CUDA streams for Blackwell optimization
+- Pinned memory utilities for efficient CPU-GPU transfers
+- Model device management with BlockSwap support
+- Memory pressure detection and cleanup
+
+Async Transfer Optimization:
+For RTX 50-series (Blackwell) GPUs, this module provides:
+- Non-blocking transfers with CUDA streams
+- Pinned memory for DMA transfers
+- Overlapped compute and data movement
+
 Extracted from: seedvr2.py (lines 373-405, 607-626, 1016-1044)
 """
 
@@ -13,11 +26,49 @@ import psutil
 import platform
 from typing import Tuple, Dict, Any, Optional, List, Union
 
+# Global async offloader for Blackwell optimization (lazy initialized)
+_global_async_offloader = None
+
 
 def _device_str(device: Union[torch.device, str]) -> str:
     """Normalized uppercase device string for comparison and logging. MPS variants → 'MPS'."""
     s = str(device).upper()
     return 'MPS' if s.startswith('MPS') else s
+
+
+def get_async_offloader(debug: Optional['Debug'] = None):
+    """
+    Get the global async offloader for efficient CPU-GPU transfers.
+    
+    Lazy-initializes the offloader on first use. The offloader provides:
+    - Pinned memory pool for reduced allocation overhead
+    - CUDA stream management for overlapped transfers
+    - Automatic Blackwell optimization detection
+    
+    Args:
+        debug: Optional debug instance for logging
+        
+    Returns:
+        AsyncModelOffloader instance (or None if not available)
+    """
+    global _global_async_offloader
+    
+    if _global_async_offloader is None:
+        try:
+            from .nvfp4 import AsyncModelOffloader, is_blackwell_gpu
+            
+            # Use larger pinned pool for Blackwell (more VRAM headroom)
+            max_pool_gb = 6.0 if is_blackwell_gpu() else 4.0
+            
+            _global_async_offloader = AsyncModelOffloader(
+                use_pinned_memory=True,
+                debug=debug,
+                max_pinned_pool_gb=max_pool_gb
+            )
+        except ImportError:
+            pass
+    
+    return _global_async_offloader
 
 
 def is_mps_available() -> bool:
@@ -667,6 +718,148 @@ def manage_tensor(
         return tensor.to(dtype=target_dtype)
 
 
+def manage_tensor_async(
+    tensor: torch.Tensor,
+    target_device: torch.device,
+    tensor_name: str = "tensor",
+    dtype: Optional[torch.dtype] = None,
+    debug: Optional['Debug'] = None,
+    reason: Optional[str] = None,
+    indent_level: int = 0,
+    use_pinned_memory: bool = True
+) -> torch.Tensor:
+    """
+    Async tensor transfer with pinned memory for optimal Blackwell performance.
+    
+    This function uses CUDA streams and pinned memory to enable overlapped
+    transfers with computation. For RTX 50-series GPUs, this can provide
+    significant speedup when model loading is IO-bound.
+    
+    Args:
+        tensor: Tensor to manage
+        target_device: Target device (torch.device object)
+        tensor_name: Descriptive name for logging
+        dtype: Optional target dtype to cast to
+        debug: Debug instance for logging
+        reason: Optional reason for the operation
+        indent_level: Indentation level for debug logging
+        use_pinned_memory: Whether to use pinned memory for CPU tensors
+        
+    Returns:
+        Tensor on target device (transfer may be in progress)
+        
+    Note:
+        - For CPU→GPU transfers, uses pinned memory + non-blocking transfer
+        - For GPU→CPU transfers, uses async D2H stream
+        - Call synchronize_async_transfers() before using the tensor
+    """
+    if tensor is None:
+        return tensor
+    
+    # Get current state
+    current_device = tensor.device
+    current_dtype = tensor.dtype
+    target_dtype = dtype if dtype is not None else current_dtype
+    
+    # Check if movement is needed
+    needs_device_move = _device_str(current_device) != _device_str(target_device)
+    needs_dtype_change = dtype is not None and current_dtype != target_dtype
+    
+    if not needs_device_move and not needs_dtype_change:
+        return tensor
+    
+    # Try to use async offloader
+    offloader = get_async_offloader(debug)
+    
+    if offloader and needs_device_move:
+        if debug:
+            current_device_str = _device_str(current_device)
+            target_device_str = _device_str(target_device)
+            dtype_info = f", {current_dtype} → {target_dtype}" if needs_dtype_change else ""
+            async_info = " (async)" if offloader else ""
+            debug.log(
+                f"Moving {tensor_name} from {current_device_str} to {target_device_str}{dtype_info}{async_info} ({reason or 'async transfer'})",
+                category="general",
+                indent_level=indent_level
+            )
+        
+        # Use async transfer
+        if needs_dtype_change:
+            tensor = tensor.to(dtype=target_dtype)
+        
+        return offloader.transfer_tensor_async(tensor, target_device, tensor_name)
+    
+    # Fallback to synchronous transfer
+    return manage_tensor(
+        tensor=tensor,
+        target_device=target_device,
+        tensor_name=tensor_name,
+        dtype=dtype,
+        non_blocking=True,  # Still use non-blocking for potential overlap
+        debug=debug,
+        reason=reason,
+        indent_level=indent_level
+    )
+
+
+def synchronize_async_transfers() -> None:
+    """
+    Wait for all async transfers to complete.
+    
+    Call this before using tensors that were transferred with manage_tensor_async().
+    """
+    offloader = get_async_offloader()
+    if offloader:
+        offloader.synchronize()
+    
+    # Also synchronize CUDA stream as fallback
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def prefetch_tensor_to_device(
+    tensor: torch.Tensor,
+    target_device: torch.device,
+    tensor_name: str = "tensor",
+    debug: Optional['Debug'] = None
+) -> torch.Tensor:
+    """
+    Prefetch tensor to device for use in next computation step.
+    
+    This enables overlapping data transfer with current computation.
+    Use this for BlockSwap-style layer prefetching.
+    
+    Args:
+        tensor: Tensor to prefetch
+        target_device: Target device
+        tensor_name: Name for tracking
+        debug: Debug instance
+        
+    Returns:
+        Tensor on target device (may still be transferring)
+    """
+    offloader = get_async_offloader(debug)
+    
+    if offloader:
+        return offloader.transfer_tensor_async(tensor, target_device, tensor_name)
+    
+    # Fallback to non-blocking transfer
+    return tensor.to(target_device, non_blocking=True)
+
+
+def cleanup_async_offloader() -> None:
+    """
+    Cleanup the global async offloader and release pinned memory.
+    
+    Call this at the end of generation to free pinned memory buffers.
+    """
+    global _global_async_offloader
+    
+    if _global_async_offloader is not None:
+        _global_async_offloader.cleanup()
+        _global_async_offloader = None
+
+
 def manage_model_device(model: torch.nn.Module, target_device: torch.device, model_name: str,
                        debug: Optional['Debug'] = None, reason: Optional[str] = None,
                        runner: Optional[Any] = None) -> bool:
@@ -1086,6 +1279,8 @@ def cleanup_dit(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
             delattr(runner, '_dit_block_swap_config')
         if hasattr(runner, '_dit_attention_mode'):
             delattr(runner, '_dit_attention_mode')
+        if hasattr(runner, '_dit_sparsity_threshold'):
+            delattr(runner, '_dit_sparsity_threshold')
     
     # 5. Clear DiT temporary attributes (should be already cleared in materialize_model)
     runner._dit_checkpoint = None
@@ -1214,6 +1409,9 @@ def complete_cleanup(runner: Any, debug: Optional['Debug'] = None, dit_cache: bo
     
     # 5. Clear cuBLAS workspaces
     torch._C._cuda_clearCublasWorkspaces() if hasattr(torch._C, '_cuda_clearCublasWorkspaces') else None
+    
+    # 6. Cleanup async offloader (releases pinned memory pool)
+    cleanup_async_offloader()
     
     # Log what models are cached for next run
     if dit_cache or vae_cache:
