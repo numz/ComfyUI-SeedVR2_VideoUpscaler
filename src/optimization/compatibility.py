@@ -136,7 +136,10 @@ flash_attn_2_varlen_func = None
 FLASH_ATTN_2_AVAILABLE = False
 try:
     from flash_attn import flash_attn_varlen_func as _fa2_varlen
-    import flash_attn_2_cuda  # noqa: F401
+    try:
+        import flash_attn_2_cuda  # noqa: F401
+    except ImportError:
+        print(f"flash_attn_2_cuda not found, falling back to flash_attn")
     flash_attn_2_varlen_func = _fa2_varlen
     FLASH_ATTN_2_AVAILABLE = True
 except (ImportError, AttributeError, OSError):
