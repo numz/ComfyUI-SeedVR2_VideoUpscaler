@@ -682,17 +682,48 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
 
 # Bfloat16 CUBLAS support
 def _probe_bfloat16_support() -> bool:
+    """Probe bfloat16 CUBLAS support without risking the ComfyUI process.
+
+    CUDA can terminate the interpreter with a native access violation while it
+    initializes or executes this probe.  A Python ``try`` block cannot catch
+    that failure, so run the operation in a child process and treat any
+    abnormal exit or timeout as lack of bfloat16 support.
+    """
     if not torch.cuda.is_available():
         return True
+
+    import subprocess
+
+    probe_script = r"""
+import sys
+
+# Do not show a Windows Error Reporting/JIT-debugger dialog if the CUDA probe
+# terminates the child process with a native exception.
+if sys.platform == "win32":
+    import ctypes
+    ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002)
+
+import torch
+
+a = torch.randn(8, 8, dtype=torch.bfloat16, device="cuda:0")
+_ = torch.matmul(a, a)
+torch.cuda.synchronize()
+print("SEEDVR2_BFLOAT16_OK")
+"""
+
     try:
-        a = torch.randn(8, 8, dtype=torch.bfloat16, device='cuda:0')
-        _ = torch.matmul(a, a)
-        del a
-        return True
-    except RuntimeError as e:
-        if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e):
-            return False
-        raise
+        result = subprocess.run(
+            [sys.executable, "-c", probe_script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=os.environ.copy(),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    return result.returncode == 0 and "SEEDVR2_BFLOAT16_OK" in result.stdout
 
 BFLOAT16_SUPPORTED = _probe_bfloat16_support()
 COMPUTE_DTYPE = torch.bfloat16 if BFLOAT16_SUPPORTED else torch.float16
@@ -952,4 +983,3 @@ class CompatibleDiT(torch.nn.Module):
                 setattr(self.dit_model, name, value)
             else:
                 super().__setattr__(name, value)
-                
