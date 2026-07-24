@@ -60,6 +60,12 @@ MODEL_REGISTRY = {
     "seedvr2_7b_sharp_fp16.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="fp16", variant="sharp", sha256="70823bca54b9c24eeb56e1c452697c7c2a430867e58db0e376c6e260f3a4489d"),
     "seedvr2_7b_sharp_fp8_e4m3fn.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="fp8_e4m3fn", variant="sharp", sha256="7602c5f70868d28e7730035e4e9d745b05d661c8f0a7eb758e63f9c8603596ef"),
 
+    # Comfy-Org INT8 convrot models (comfy_kitchen int8_tensorwise + convolution rotation).
+    # Dequantized on load via comfy.quant_ops (see model_loader._dequantize_comfy_quant_state).
+    "seedvr2_3b_int8_convrot.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="3B", precision="int8_convrot", sha256="c3dec8bcc5916843a8a858572970597462e1f2dc598d6dfd818f6cd40f53a157"),
+    "seedvr2_7b_int8_convrot.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="int8_convrot", sha256="5aa0d25fc9d35e449b659d0c9a5dcb22e2a4fa04032101b95a39da42b32c1be6"),
+    "seedvr2_7b_sharp_int8_convrot.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="int8_convrot", variant="sharp", sha256="db48be2f1cc7e36b01a2aa529810f5d9c6a971edd29be225cf1b0eb18d51c366"),
+
     # VAE models
     "ema_vae_fp16.safetensors": ModelInfo(category="vae", precision="fp16", sha256="20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1"),
 }
