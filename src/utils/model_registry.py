@@ -28,6 +28,7 @@ class ModelInfo:
     precision: str = "fp16" # 'fp16', 'fp8_e4m3fn', 'Q4_K_M', etc.
     size: str = "3B" # '3B', '7B', etc.
     variant: Optional[str] = None # 'sharp', etc.
+    subfolder: Optional[str] = None # HF repo subfolder, e.g. 'diffusion_models' for Comfy-Org
     sha256: Optional[str] = None # Cached hash
 
 # Model registry with metadata
@@ -48,6 +49,17 @@ MODEL_REGISTRY = {
     "seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="sharp", sha256="0d2c5b8be0fda94351149c5115da26aef4f4932a7a2a928c6f184dda9186e0be"),
     "seedvr2_ema_7b_sharp_fp16.safetensors": ModelInfo(size="7B", precision="fp16", variant="sharp", sha256="20a93e01ff24beaeebc5de4e4e5be924359606c356c9c51509fba245bd2d77dd"),
     
+    # Comfy-Org official models (https://huggingface.co/Comfy-Org/SeedVR2)
+    # Same DiT weights as above (plus baked-in conditioning tensors, ignored on load).
+    # Only the drop-in formats (fp16, fp8_e4m3fn) are registered here; the quantized
+    # formats (int8_convrot, mxfp8, nvfp4) require comfy_kitchen dequantization support.
+    "seedvr2_3b_fp16.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="3B", precision="fp16", sha256="98669fd2c06df5eca88baf68cd5c478775c8e61fc110e598c52b350145ea2660"),
+    "seedvr2_3b_fp8_e4m3fn.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="3B", precision="fp8_e4m3fn", sha256="a0226eaa2c3e6f47ae5ce83225120f16479da890ced1a3bc32b1a14619787914"),
+    "seedvr2_7b_fp16.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="fp16", sha256="2742ca6fee63bc5cc1773f426dd4b07b78cad27f51c9ea5cd42b035e6b592252"),
+    "seedvr2_7b_fp8_e4m3fn.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="fp8_e4m3fn", sha256="5065e77d647dd553d9090a81e20d6de590d931a61df79d785e008433926ee418"),
+    "seedvr2_7b_sharp_fp16.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="fp16", variant="sharp", sha256="70823bca54b9c24eeb56e1c452697c7c2a430867e58db0e376c6e260f3a4489d"),
+    "seedvr2_7b_sharp_fp8_e4m3fn.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="fp8_e4m3fn", variant="sharp", sha256="7602c5f70868d28e7730035e4e9d745b05d661c8f0a7eb758e63f9c8603596ef"),
+
     # VAE models
     "ema_vae_fp16.safetensors": ModelInfo(category="vae", precision="fp16", sha256="20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1"),
 }
