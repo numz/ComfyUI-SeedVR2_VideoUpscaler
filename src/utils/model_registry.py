@@ -66,6 +66,16 @@ MODEL_REGISTRY = {
     "seedvr2_7b_int8_convrot.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="int8_convrot", sha256="5aa0d25fc9d35e449b659d0c9a5dcb22e2a4fa04032101b95a39da42b32c1be6"),
     "seedvr2_7b_sharp_int8_convrot.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="int8_convrot", variant="sharp", sha256="db48be2f1cc7e36b01a2aa529810f5d9c6a971edd29be225cf1b0eb18d51c366"),
 
+    # Comfy-Org MXFP8 models (comfy_kitchen mxfp8, dequantized on load).
+    "seedvr2_3b_mxfp8.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="3B", precision="mxfp8", sha256="768623e3bfb1752b4d0668782751b5fead58b1bcb153f0b5e03a423095630297"),
+    "seedvr2_7b_mxfp8.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="mxfp8", sha256="b40804f47910d96c5089c728cc7ec8b57b956750eabb6397dc4e6e697477263d"),
+    "seedvr2_7b_sharp_mxfp8.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="mxfp8", variant="sharp", sha256="0d621ec1561a11ca9b5f432ec6d4e09b263b61f4b83b0280552c8b4add030ec3"),
+
+    # Comfy-Org NVFP4 models (comfy_kitchen nvfp4, dequantized on load).
+    "seedvr2_3b_nvfp4.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="3B", precision="nvfp4", sha256="c8dea38b04d43295621726e2cd371c0d2d001006169c113aea17950f2cb2e295"),
+    "seedvr2_7b_nvfp4.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="nvfp4", sha256="cc4af1a7bd5377066496f393555478323e806fa21163bdbe3409451aface9b93"),
+    "seedvr2_7b_sharp_nvfp4.safetensors": ModelInfo(repo="Comfy-Org/SeedVR2", subfolder="diffusion_models", size="7B", precision="nvfp4", variant="sharp", sha256="80d57af7722f5a5bd4c01d2ab2688f2bf05e552e59d3d3287257de709db10397"),
+
     # VAE models
     "ema_vae_fp16.safetensors": ModelInfo(category="vae", precision="fp16", sha256="20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1"),
 }

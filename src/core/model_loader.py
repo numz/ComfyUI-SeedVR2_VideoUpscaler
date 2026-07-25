@@ -87,17 +87,25 @@ def _dequantize_comfy_quant_state(state: Dict[str, torch.Tensor],
     """
     Dequantize weights stored in ComfyUI's comfy_kitchen quantization format.
 
-    The official Comfy-Org SeedVR2 checkpoints (e.g. *_int8_convrot.safetensors)
-    store each quantized Linear as three tensors:
-      <layer>.weight        int8  [out, in]   - rotated + quantized weight
-      <layer>.weight_scale  fp32  [out, 1]    - per-output-channel scale
-      <layer>.comfy_quant   uint8 [N]         - JSON metadata blob, e.g.
-          {"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}
+    The official Comfy-Org SeedVR2 checkpoints store each quantized Linear as a
+    weight tensor plus per-format scale tensors and a comfy_quant JSON blob that
+    names the format. The three quantized variants and their on-disk layout:
+      int8_convrot ({"format":"int8_tensorwise","convrot":true,...})
+          weight       int8      [out, in]   rotated + quantized weight
+          weight_scale fp32      [out, 1]    per-output-channel scale
+      mxfp8 ({"format":"mxfp8"})
+          weight       fp8_e4m3  [out, in]
+          weight_scale uint8     [out, in/32] block scales (viewed as e8m0fnu)
+      nvfp4 ({"format":"nvfp4"})
+          weight       uint8     [out, in/2] packed 2x fp4 per byte
+          weight_scale fp8_e4m3  [out, in/16] block scales
+          weight_scale_2 fp32    []           tensor-wise scale
+      (all also carry comfy_quant uint8 [N] - the JSON metadata blob)
 
     These cannot be fed to a plain nn.Linear. We reconstruct the ComfyUI
     QuantizedTensor exactly as comfy.ops._load_quantized_module does, then
     dequantize back to `compute_dtype` so the existing NaDiT model loads them
-    unchanged. This is universal (works without the fast INT8 tensor-core path)
+    unchanged. This is universal (works without the fast tensor-core kernels)
     at the cost of the runtime VRAM/speed savings of true quantized inference.
 
     Layers without a comfy_quant blob are left untouched, so plain fp16/fp8 and
@@ -137,7 +145,9 @@ def _dequantize_comfy_quant_state(state: Dict[str, torch.Tensor],
         if fmt not in QUANT_ALGOS:
             raise ValueError(
                 f"Unknown quantization format '{fmt}' for layer '{layer_name}'. "
-                "Supported comfy_kitchen format in this node: int8_tensorwise (convrot)."
+                "Supported comfy_kitchen formats in this node: int8_tensorwise "
+                "(convrot), mxfp8, nvfp4. If it is expected, update ComfyUI / "
+                "comfy_kitchen."
             )
 
         dev = weight.device
@@ -150,9 +160,11 @@ def _dequantize_comfy_quant_state(state: Dict[str, torch.Tensor],
                     v = v.view(dtype=view_dtype)
             return v
 
-        # Only int8_tensorwise (as used by the *_int8_convrot models) is verified
-        # here. Packed formats (nvfp4) and block-scaled fp8 (mxfp8) need extra
-        # shape handling and are intentionally not enabled yet.
+        # Build the per-format Params + logical weight shape, mirroring
+        # comfy.ops._load_quantized_module. orig_shape is the *logical* [out, in];
+        # for nvfp4 the stored weight is packed 2x along the in-dim so it must be
+        # doubled (SeedVR2 in-dims are all multiples of the group size, so there
+        # is no padding to account for).
         if fmt == "int8_tensorwise":
             scale = pop_scale("weight_scale")
             if scale is None:
@@ -164,18 +176,32 @@ def _dequantize_comfy_quant_state(state: Dict[str, torch.Tensor],
                     layer_conf.get("convrot_groupsize",
                                    params_conf.get("convrot_groupsize", 256))
                 )
+            orig_shape = torch.Size(weight.shape)
+        elif fmt == "mxfp8":
+            bs = pop_scale("weight_scale", torch.float8_e8m0fnu)
+            if bs is None:
+                raise ValueError(f"Missing MXFP8 block scales for layer '{layer_name}'")
+            scales = {"scale": bs}
+            orig_shape = torch.Size(weight.shape)
+        elif fmt == "nvfp4":
+            ts = pop_scale("weight_scale_2")
+            bs = pop_scale("weight_scale", torch.float8_e4m3fn)
+            if ts is None or bs is None:
+                raise ValueError(f"Missing NVFP4 scales for layer '{layer_name}'")
+            scales = {"scale": ts, "block_scale": bs}
+            orig_shape = torch.Size((weight.shape[0], weight.shape[1] * 2))
         else:
             raise NotImplementedError(
-                f"Quantization format '{fmt}' (layer '{layer_name}') is not yet "
-                "supported by this node. Use the fp16, fp8_e4m3fn or int8_convrot "
-                "checkpoints."
+                f"Quantization format '{fmt}' (layer '{layer_name}') is not "
+                "supported by this node. Use an fp16, fp8_e4m3fn, int8_convrot, "
+                "mxfp8 or nvfp4 checkpoint."
             )
 
         qconfig = QUANT_ALGOS[fmt]
         layout_type = qconfig["comfy_tensor_layout"]
         layout_cls = get_layout_class(layout_type)
         params = layout_cls.Params(**scales, orig_dtype=compute_dtype,
-                                   orig_shape=torch.Size(weight.shape))
+                                   orig_shape=orig_shape)
         qt = QuantizedTensor(weight.to(device=dev, dtype=qconfig["storage_t"]),
                              layout_type, params)
         state[f"{prefix}weight"] = qt.dequantize().to(dtype=compute_dtype)
