@@ -81,6 +81,262 @@ from ..utils.constants import get_script_directory, suppress_tensor_warnings
 script_directory = get_script_directory()
 
 
+# Formats comfy_kitchen can execute natively. Anything outside this set is
+# emulated, which is slower than simply dequantizing once at load time, so we
+# only take the native path when the running GPU actually has the kernels.
+_NATIVE_QUANT_FORMATS = ("int8_tensorwise", "convrot_w4a4", "float8_e4m3fn", "float8_e5m2")
+
+
+def native_quant_supported(fmt: str) -> bool:
+    """Whether comfy_kitchen has a native kernel for this format on this GPU."""
+    if fmt not in _NATIVE_QUANT_FORMATS:
+        return False
+    try:
+        import comfy.quant_ops  # noqa: F401
+        from comfy.quant_ops import QUANT_ALGOS
+        if fmt not in QUANT_ALGOS:
+            return False
+        import comfy_kitchen
+        caps = set(getattr(comfy_kitchen, "native_ops", ()) or ())
+        if not caps:
+            # Older/newer comfy_kitchen without an introspection hook: assume the
+            # format is usable if ComfyUI registered it at all.
+            return True
+        needed = {"int8_tensorwise": "int8_linear", "convrot_w4a4": "convrot_w4a4_linear"}.get(fmt)
+        return needed is None or needed in caps
+    except Exception:
+        return False
+
+
+def apply_native_quantized_modules(model: torch.nn.Module,
+                                   state: Dict[str, torch.Tensor],
+                                   compute_dtype: torch.dtype = torch.float16,
+                                   debug: Optional['Debug'] = None) -> set:
+    """Swap nn.Linear for ComfyUI's quantized Linear wherever the checkpoint is quantized.
+
+    The alternative -- _dequantize_comfy_quant_state() -- reconstructs every
+    quantized weight as compute_dtype, which doubles the DiT's resident size
+    (an 8.3 GB int8 checkpoint becomes ~16.6 GB of fp16) and discards the
+    quantized kernels entirely. Keeping ComfyUI's QuantizedTensor halves the
+    footprint and runs on the native tensor cores instead.
+
+    Must be called *before* model.load_state_dict(); the replacement modules
+    consume the weight/scale/comfy_quant keys through their own
+    _load_from_state_dict.
+
+    Returns the set of state-dict prefixes left quantized, to be passed to
+    _dequantize_comfy_quant_state(skip_prefixes=...) so they are not undone.
+    An empty set means nothing was quantized, or the formats present have no
+    native kernel on this GPU.
+    """
+    quant_prefixes = [k[: -len("comfy_quant")] for k in state if k.endswith(".comfy_quant")]
+    if not quant_prefixes:
+        return set()
+
+    try:
+        import json
+        import comfy.ops as comfy_ops
+    except Exception as err:
+        if debug:
+            debug.log("Native quantized inference unavailable ({}), falling back to dequantize-on-load".format(err),
+                      level="WARNING", category="dit", force=True)
+        return set()
+
+    ops_ns = comfy_ops.mixed_precision_ops(quant_config={}, compute_dtype=compute_dtype)
+    modules = dict(model.named_modules())
+    kept_quantized = set()
+    skipped_formats = set()
+
+    for prefix in quant_prefixes:
+        name = prefix.rstrip(".")
+        target = modules.get(name)
+        if not isinstance(target, torch.nn.Linear):
+            continue
+
+        try:
+            conf = json.loads(state[prefix + "comfy_quant"].numpy().tobytes())
+        except Exception:
+            continue
+        fmt = conf.get("format")
+        if not native_quant_supported(fmt):
+            skipped_formats.add(fmt)
+            continue
+
+        parent_name, _, attr = name.rpartition(".")
+        parent = modules.get(parent_name) if parent_name else model
+        if parent is None:
+            continue
+
+        # Must be the device the incoming weights live on, NOT meta.
+        # _load_quantized_module reads factory_kwargs["device"] back out and
+        # does weight.to(device=...) on the loaded tensor, so a meta module
+        # would push real weights onto meta and leave them dataless.
+        weight_device = state[prefix + "weight"].device
+
+        replacement = ops_ns.Linear(
+            target.in_features,
+            target.out_features,
+            bias=target.bias is not None,
+            device=weight_device,
+            dtype=compute_dtype,
+        )
+        # ComfyUI's ops only take the quantized path when this is set; it is
+        # False by default on CastWeightBiasOp.
+        replacement.comfy_cast_weights = True
+        setattr(parent, attr, replacement)
+        modules[name] = replacement
+        kept_quantized.add(prefix)
+
+    if debug:
+        if kept_quantized:
+            debug.log("Native quantized inference: {} layer(s) kept quantized (no dequantization)".format(
+                len(kept_quantized)), category="dit", force=True)
+        if skipped_formats:
+            debug.log("Formats without native kernels here, will be dequantized: {}".format(
+                ", ".join(sorted(f for f in skipped_formats if f))),
+                category="dit", force=True)
+    return kept_quantized
+
+
+def _dequantize_comfy_quant_state(state: Dict[str, torch.Tensor],
+                                  compute_dtype: torch.dtype = torch.float16,
+                                  debug: Optional['Debug'] = None,
+                                  skip_prefixes: Optional[set] = None) -> Dict[str, torch.Tensor]:
+    """
+    Dequantize weights stored in ComfyUI's comfy_kitchen quantization format.
+
+    `skip_prefixes` names layers that apply_native_quantized_modules() has
+    already re-pointed at ComfyUI's quantized Linear. Those keep their quantized
+    weight and scales so the module can consume them directly, and only the
+    remaining layers are reconstructed here.
+
+    The official Comfy-Org SeedVR2 checkpoints store each quantized Linear as a
+    weight tensor plus per-format scale tensors and a comfy_quant JSON blob that
+    names the format. The three quantized variants and their on-disk layout:
+      int8_convrot ({"format":"int8_tensorwise","convrot":true,...})
+          weight       int8      [out, in]   rotated + quantized weight
+          weight_scale fp32      [out, 1]    per-output-channel scale
+      mxfp8 ({"format":"mxfp8"})
+          weight       fp8_e4m3  [out, in]
+          weight_scale uint8     [out, in/32] block scales (viewed as e8m0fnu)
+      nvfp4 ({"format":"nvfp4"})
+          weight       uint8     [out, in/2] packed 2x fp4 per byte
+          weight_scale fp8_e4m3  [out, in/16] block scales
+          weight_scale_2 fp32    []           tensor-wise scale
+      (all also carry comfy_quant uint8 [N] - the JSON metadata blob)
+
+    These cannot be fed to a plain nn.Linear. We reconstruct the ComfyUI
+    QuantizedTensor exactly as comfy.ops._load_quantized_module does, then
+    dequantize back to `compute_dtype` so the existing NaDiT model loads them
+    unchanged. This is universal (works without the fast tensor-core kernels)
+    at the cost of the runtime VRAM/speed savings of true quantized inference.
+
+    Layers without a comfy_quant blob are left untouched, so plain fp16/fp8 and
+    GGUF checkpoints pass through as a no-op.
+    """
+    skip_prefixes = skip_prefixes or set()
+    quant_prefixes = [k[:-len("comfy_quant")] for k in list(state.keys())
+                      if k.endswith(".comfy_quant") and k[:-len("comfy_quant")] not in skip_prefixes]
+    if not quant_prefixes:
+        return state
+
+    # comfy.quant_ops (and the comfy_kitchen backend) live in ComfyUI core.
+    try:
+        import json
+        from comfy.quant_ops import QuantizedTensor, QUANT_ALGOS, get_layout_class
+    except Exception as e:
+        raise ImportError(
+            "This checkpoint is quantized with ComfyUI's comfy_kitchen format "
+            "(e.g. int8_convrot). Loading it requires a ComfyUI build that provides "
+            "comfy.quant_ops and the comfy_kitchen package. Import failed: "
+            f"{e}\nUse an fp16/fp8 checkpoint instead, or update ComfyUI."
+        )
+
+    dequantized = 0
+    for prefix in quant_prefixes:
+        layer_name = prefix.rstrip('.')
+        weight = state.get(f"{prefix}weight")
+        conf_t = state.pop(f"{prefix}comfy_quant", None)
+        if weight is None or conf_t is None:
+            continue
+
+        layer_conf = json.loads(conf_t.cpu().numpy().tobytes())
+        fmt = layer_conf.get("format")
+        params_conf = layer_conf.get("params", {})
+        if not isinstance(params_conf, dict):
+            params_conf = {}
+
+        if fmt not in QUANT_ALGOS:
+            raise ValueError(
+                f"Unknown quantization format '{fmt}' for layer '{layer_name}'. "
+                "Supported comfy_kitchen formats in this node: int8_tensorwise "
+                "(convrot), mxfp8, nvfp4. If it is expected, update ComfyUI / "
+                "comfy_kitchen."
+            )
+
+        dev = weight.device
+
+        def pop_scale(name: str, view_dtype: Optional[torch.dtype] = None):
+            v = state.pop(f"{prefix}{name}", None)
+            if v is not None:
+                v = v.to(device=dev)
+                if view_dtype is not None:
+                    v = v.view(dtype=view_dtype)
+            return v
+
+        # Build the per-format Params + logical weight shape, mirroring
+        # comfy.ops._load_quantized_module. orig_shape is the *logical* [out, in];
+        # for nvfp4 the stored weight is packed 2x along the in-dim so it must be
+        # doubled (SeedVR2 in-dims are all multiples of the group size, so there
+        # is no padding to account for).
+        if fmt == "int8_tensorwise":
+            scale = pop_scale("weight_scale")
+            if scale is None:
+                raise ValueError(f"Missing INT8 weight scale for layer '{layer_name}'")
+            scales = {"scale": scale}
+            if layer_conf.get("convrot", params_conf.get("convrot", False)):
+                scales["convrot"] = True
+                scales["convrot_groupsize"] = int(
+                    layer_conf.get("convrot_groupsize",
+                                   params_conf.get("convrot_groupsize", 256))
+                )
+            orig_shape = torch.Size(weight.shape)
+        elif fmt == "mxfp8":
+            bs = pop_scale("weight_scale", torch.float8_e8m0fnu)
+            if bs is None:
+                raise ValueError(f"Missing MXFP8 block scales for layer '{layer_name}'")
+            scales = {"scale": bs}
+            orig_shape = torch.Size(weight.shape)
+        elif fmt == "nvfp4":
+            ts = pop_scale("weight_scale_2")
+            bs = pop_scale("weight_scale", torch.float8_e4m3fn)
+            if ts is None or bs is None:
+                raise ValueError(f"Missing NVFP4 scales for layer '{layer_name}'")
+            scales = {"scale": ts, "block_scale": bs}
+            orig_shape = torch.Size((weight.shape[0], weight.shape[1] * 2))
+        else:
+            raise NotImplementedError(
+                f"Quantization format '{fmt}' (layer '{layer_name}') is not "
+                "supported by this node. Use an fp16, fp8_e4m3fn, int8_convrot, "
+                "mxfp8 or nvfp4 checkpoint."
+            )
+
+        qconfig = QUANT_ALGOS[fmt]
+        layout_type = qconfig["comfy_tensor_layout"]
+        layout_cls = get_layout_class(layout_type)
+        params = layout_cls.Params(**scales, orig_dtype=compute_dtype,
+                                   orig_shape=orig_shape)
+        qt = QuantizedTensor(weight.to(device=dev, dtype=qconfig["storage_t"]),
+                             layout_type, params)
+        state[f"{prefix}weight"] = qt.dequantize().to(dtype=compute_dtype)
+        dequantized += 1
+
+    if debug and dequantized:
+        debug.log(f"Dequantized {dequantized} comfy_kitchen quantized layer(s) "
+                  f"to {compute_dtype}", category="dit", force=True)
+    return state
+
+
 def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch.device("cpu"),
                               debug: Optional['Debug'] = None) -> Dict[str, torch.Tensor]:
     """
@@ -149,7 +405,10 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
         state = torch.load(checkpoint_path, map_location=device_str, mmap=True, weights_only=True)
     else:
         raise ValueError(f"Unsupported checkpoint format. Expected .safetensors or .pth, got: {checkpoint_path}")
-    
+
+    # Quantized weights are left as-is here. Reconstruction now happens at the
+    # load site, after apply_native_quantized_modules() has had a chance to keep
+    # natively-supported layers quantized -- only the remainder is dequantized.
     return state
 
 
@@ -819,6 +1078,16 @@ def _load_standard_weights(model: torch.nn.Module, state: Dict[str, torch.Tensor
                           used_meta: bool, model_type: str, model_type_lower: str,
                           debug: Optional['Debug'] = None) -> torch.nn.Module:
     """Load standard (non-GGUF) weights into model."""
+    # Keep comfy_kitchen-quantized layers quantized where the GPU has native
+    # kernels, and reconstruct only the remainder. Both are no-ops for plain
+    # fp16/fp8 checkpoints, which carry no comfy_quant metadata.
+    kept_quantized = apply_native_quantized_modules(
+        model, state, compute_dtype=torch.float16, debug=debug
+    )
+    state = _dequantize_comfy_quant_state(
+        state, compute_dtype=torch.float16, debug=debug, skip_prefixes=kept_quantized
+    )
+
     debug.start_timer(f"{model_type_lower}_state_apply")
     model.load_state_dict(state, strict=False, assign=True)
     

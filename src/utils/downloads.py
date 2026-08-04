@@ -204,7 +204,11 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
             
         expected_hash = model_info.sha256
         repo = model_info.repo
-        
+        # Some repos (e.g. Comfy-Org) store weights under a subfolder. The on-disk
+        # filename stays flat; only the remote download path carries the subfolder.
+        subfolder = getattr(model_info, "subfolder", None)
+        remote_path = f"{subfolder}/{filename}" if subfolder else filename
+
         ## Quick cache check first
         if is_file_validated_cached(filepath, cache_dir):
             # Debug log: Model already validated (using cache)
@@ -235,7 +239,7 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
                     save_validation_cache(cache, cache_dir)
         
         # Download file
-        url = HUGGINGFACE_BASE_URL.format(repo=repo, filename=filename)
+        url = HUGGINGFACE_BASE_URL.format(repo=repo, filename=remote_path)
         temp_file = f"{filepath}.download"
         
         if os.path.exists(temp_file) and debug:
