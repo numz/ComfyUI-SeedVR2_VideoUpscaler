@@ -630,7 +630,8 @@ def _stream_video_chunks(
     log_progress: bool = False,
     total_chunks: int = 0,
     cleanup_timer_name: Optional[str] = None,
-    log_prefix: str = ""
+    log_prefix: str = "",
+    strip_prepend: bool = True
 ) -> Generator[torch.Tensor, None, None]:
     """
     Generator that streams and processes video chunks.
@@ -698,7 +699,8 @@ def _stream_video_chunks(
             args=chunk_args,
             device_id=device_id,
             debug=debug,
-            runner_cache=runner_cache
+            runner_cache=runner_cache,
+            strip_prepend=strip_prepend
         )
         
         # Remove context frames from output
@@ -833,24 +835,29 @@ def _process_frames_core(
     args: argparse.Namespace,
     device_id: str,
     debug: Debug,
-    runner_cache: Optional[Dict[str, Any]] = None
+    runner_cache: Optional[Dict[str, Any]] = None,
+    strip_prepend: bool = True
 ) -> torch.Tensor:
     """
     Core frame processing logic shared between worker and direct processing.
-    
+
     Executes the complete 4-phase pipeline: encode → upscale → decode → postprocess.
     Supports both cached (direct) and non-cached (worker) execution modes.
-    
+
     Args:
         frames_tensor: Input frames [T, H, W, C], Float16/Float32, range [0,1]
         args: Command-line arguments with all processing settings
         device_id: Device ID for inference ("0", "1", etc.)
         debug: Debug instance for logging
         runner_cache: Optional cache dict for model reuse (direct mode only)
-    
+        strip_prepend: Remove prepended warm-up frames here. True for single-GPU,
+                       where nothing downstream will do it. False in worker mode,
+                       where _gpu_processing strips them after combining workers -
+                       stripping in both places would eat real frames.
+
     Returns:
         Upscaled frames tensor [T', H', W', C], Float32, range [0,1]
-    """    
+    """
     # Determine platform and convert device IDs to full names
     platform_type = get_gpu_backend()
     inference_device = _device_id_to_name(device_id, platform_type)
@@ -996,7 +1003,7 @@ def _process_frames_core(
     ctx = postprocess_all_batches(
         ctx=ctx, debug=debug, progress_callback=None,
         color_correction=args.color_correction,
-        prepend_frames=0,  # Worker mode handles this in main process
+        prepend_frames=args.prepend_frames if strip_prepend else 0,  # worker mode strips in main process
         temporal_overlap=args.temporal_overlap,
         batch_size=args.batch_size
     )
@@ -1078,7 +1085,8 @@ def _worker_process(
             runner_cache=runner_cache,
             log_progress=total_chunks > 1,
             total_chunks=total_chunks,
-            log_prefix=f"[GPU {proc_idx}] "
+            log_prefix=f"[GPU {proc_idx}] ",
+            strip_prepend=False  # _gpu_processing strips after combining workers
         ):
             results.append(result.cpu())
         
@@ -1093,7 +1101,8 @@ def _worker_process(
             args=args,
             device_id="0",
             debug=worker_debug,
-            runner_cache=None
+            runner_cache=None,
+            strip_prepend=False  # _gpu_processing strips after combining workers
         )
     
     # Share tensor memory for efficient cross-process transfer (avoids pickling large arrays)
