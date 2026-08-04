@@ -81,11 +81,134 @@ from ..utils.constants import get_script_directory, suppress_tensor_warnings
 script_directory = get_script_directory()
 
 
+# Formats comfy_kitchen can execute natively. Anything outside this set is
+# emulated, which is slower than simply dequantizing once at load time, so we
+# only take the native path when the running GPU actually has the kernels.
+_NATIVE_QUANT_FORMATS = ("int8_tensorwise", "convrot_w4a4", "float8_e4m3fn", "float8_e5m2")
+
+
+def native_quant_supported(fmt: str) -> bool:
+    """Whether comfy_kitchen has a native kernel for this format on this GPU."""
+    if fmt not in _NATIVE_QUANT_FORMATS:
+        return False
+    try:
+        import comfy.quant_ops  # noqa: F401
+        from comfy.quant_ops import QUANT_ALGOS
+        if fmt not in QUANT_ALGOS:
+            return False
+        import comfy_kitchen
+        caps = set(getattr(comfy_kitchen, "native_ops", ()) or ())
+        if not caps:
+            # Older/newer comfy_kitchen without an introspection hook: assume the
+            # format is usable if ComfyUI registered it at all.
+            return True
+        needed = {"int8_tensorwise": "int8_linear", "convrot_w4a4": "convrot_w4a4_linear"}.get(fmt)
+        return needed is None or needed in caps
+    except Exception:
+        return False
+
+
+def apply_native_quantized_modules(model: torch.nn.Module,
+                                   state: Dict[str, torch.Tensor],
+                                   compute_dtype: torch.dtype = torch.float16,
+                                   debug: Optional['Debug'] = None) -> set:
+    """Swap nn.Linear for ComfyUI's quantized Linear wherever the checkpoint is quantized.
+
+    The alternative -- _dequantize_comfy_quant_state() -- reconstructs every
+    quantized weight as compute_dtype, which doubles the DiT's resident size
+    (an 8.3 GB int8 checkpoint becomes ~16.6 GB of fp16) and discards the
+    quantized kernels entirely. Keeping ComfyUI's QuantizedTensor halves the
+    footprint and runs on the native tensor cores instead.
+
+    Must be called *before* model.load_state_dict(); the replacement modules
+    consume the weight/scale/comfy_quant keys through their own
+    _load_from_state_dict.
+
+    Returns the set of state-dict prefixes left quantized, to be passed to
+    _dequantize_comfy_quant_state(skip_prefixes=...) so they are not undone.
+    An empty set means nothing was quantized, or the formats present have no
+    native kernel on this GPU.
+    """
+    quant_prefixes = [k[: -len("comfy_quant")] for k in state if k.endswith(".comfy_quant")]
+    if not quant_prefixes:
+        return set()
+
+    try:
+        import json
+        import comfy.ops as comfy_ops
+    except Exception as err:
+        if debug:
+            debug.log("Native quantized inference unavailable ({}), falling back to dequantize-on-load".format(err),
+                      level="WARNING", category="dit", force=True)
+        return set()
+
+    ops_ns = comfy_ops.mixed_precision_ops(quant_config={}, compute_dtype=compute_dtype)
+    modules = dict(model.named_modules())
+    kept_quantized = set()
+    skipped_formats = set()
+
+    for prefix in quant_prefixes:
+        name = prefix.rstrip(".")
+        target = modules.get(name)
+        if not isinstance(target, torch.nn.Linear):
+            continue
+
+        try:
+            conf = json.loads(state[prefix + "comfy_quant"].numpy().tobytes())
+        except Exception:
+            continue
+        fmt = conf.get("format")
+        if not native_quant_supported(fmt):
+            skipped_formats.add(fmt)
+            continue
+
+        parent_name, _, attr = name.rpartition(".")
+        parent = modules.get(parent_name) if parent_name else model
+        if parent is None:
+            continue
+
+        # Must be the device the incoming weights live on, NOT meta.
+        # _load_quantized_module reads factory_kwargs["device"] back out and
+        # does weight.to(device=...) on the loaded tensor, so a meta module
+        # would push real weights onto meta and leave them dataless.
+        weight_device = state[prefix + "weight"].device
+
+        replacement = ops_ns.Linear(
+            target.in_features,
+            target.out_features,
+            bias=target.bias is not None,
+            device=weight_device,
+            dtype=compute_dtype,
+        )
+        # ComfyUI's ops only take the quantized path when this is set; it is
+        # False by default on CastWeightBiasOp.
+        replacement.comfy_cast_weights = True
+        setattr(parent, attr, replacement)
+        modules[name] = replacement
+        kept_quantized.add(prefix)
+
+    if debug:
+        if kept_quantized:
+            debug.log("Native quantized inference: {} layer(s) kept quantized (no dequantization)".format(
+                len(kept_quantized)), category="dit", force=True)
+        if skipped_formats:
+            debug.log("Formats without native kernels here, will be dequantized: {}".format(
+                ", ".join(sorted(f for f in skipped_formats if f))),
+                category="dit", force=True)
+    return kept_quantized
+
+
 def _dequantize_comfy_quant_state(state: Dict[str, torch.Tensor],
                                   compute_dtype: torch.dtype = torch.float16,
-                                  debug: Optional['Debug'] = None) -> Dict[str, torch.Tensor]:
+                                  debug: Optional['Debug'] = None,
+                                  skip_prefixes: Optional[set] = None) -> Dict[str, torch.Tensor]:
     """
     Dequantize weights stored in ComfyUI's comfy_kitchen quantization format.
+
+    `skip_prefixes` names layers that apply_native_quantized_modules() has
+    already re-pointed at ComfyUI's quantized Linear. Those keep their quantized
+    weight and scales so the module can consume them directly, and only the
+    remaining layers are reconstructed here.
 
     The official Comfy-Org SeedVR2 checkpoints store each quantized Linear as a
     weight tensor plus per-format scale tensors and a comfy_quant JSON blob that
@@ -111,8 +234,9 @@ def _dequantize_comfy_quant_state(state: Dict[str, torch.Tensor],
     Layers without a comfy_quant blob are left untouched, so plain fp16/fp8 and
     GGUF checkpoints pass through as a no-op.
     """
+    skip_prefixes = skip_prefixes or set()
     quant_prefixes = [k[:-len("comfy_quant")] for k in list(state.keys())
-                      if k.endswith(".comfy_quant")]
+                      if k.endswith(".comfy_quant") and k[:-len("comfy_quant")] not in skip_prefixes]
     if not quant_prefixes:
         return state
 
@@ -282,10 +406,9 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
     else:
         raise ValueError(f"Unsupported checkpoint format. Expected .safetensors or .pth, got: {checkpoint_path}")
 
-    # Reconstruct any comfy_kitchen-quantized weights (e.g. int8_convrot) into
-    # plain tensors. No-op for standard fp16/fp8/GGUF checkpoints.
-    state = _dequantize_comfy_quant_state(state, compute_dtype=torch.float16, debug=debug)
-
+    # Quantized weights are left as-is here. Reconstruction now happens at the
+    # load site, after apply_native_quantized_modules() has had a chance to keep
+    # natively-supported layers quantized -- only the remainder is dequantized.
     return state
 
 
@@ -955,6 +1078,16 @@ def _load_standard_weights(model: torch.nn.Module, state: Dict[str, torch.Tensor
                           used_meta: bool, model_type: str, model_type_lower: str,
                           debug: Optional['Debug'] = None) -> torch.nn.Module:
     """Load standard (non-GGUF) weights into model."""
+    # Keep comfy_kitchen-quantized layers quantized where the GPU has native
+    # kernels, and reconstruct only the remainder. Both are no-ops for plain
+    # fp16/fp8 checkpoints, which carry no comfy_quant metadata.
+    kept_quantized = apply_native_quantized_modules(
+        model, state, compute_dtype=torch.float16, debug=debug
+    )
+    state = _dequantize_comfy_quant_state(
+        state, compute_dtype=torch.float16, debug=debug, skip_prefixes=kept_quantized
+    )
+
     debug.start_timer(f"{model_type_lower}_state_apply")
     model.load_state_dict(state, strict=False, assign=True)
     
