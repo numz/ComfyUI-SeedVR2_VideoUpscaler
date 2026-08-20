@@ -49,6 +49,7 @@ This module is used by model_configuration for weight loading during materializa
 """
 
 import os
+import json
 import torch
 from omegaconf import OmegaConf
 from typing import Dict, Any, Optional, Tuple, Union, Callable
@@ -65,7 +66,8 @@ from ..common.config import create_object
 from ..optimization.compatibility import (
     GGUF_AVAILABLE,
     GGMLQuantizationType,
-    validate_gguf_availability
+    validate_gguf_availability,
+    COMPUTE_DTYPE
 )
 
 # GGUF-specific imports (only when available)
@@ -590,7 +592,7 @@ def _load_model_weights(model: torch.nn.Module, checkpoint_path: str, target_dev
     if checkpoint_path.endswith('.gguf'):
         model = _load_gguf_weights(model, state, used_meta, model_type_lower, debug)
     else:
-        model = _load_standard_weights(model, state, used_meta, model_type, model_type_lower, debug)
+        model = _load_standard_weights(model, state, used_meta, model_type, model_type_lower, target_device, debug)
     
     # Clean up state dict
     del state
@@ -815,13 +817,269 @@ def initialize_meta_buffers_impl(model: torch.nn.Module, target_device: torch.de
     return initialized_count
 
 
+def _decode_comfy_quant_config(tensor: torch.Tensor) -> Optional[Dict[str, Any]]:
+    """Decode a ComfyUI per-layer ``comfy_quant`` marker tensor."""
+    if not torch.is_tensor(tensor):
+        return None
+    try:
+        # ``json.loads(tensor.numpy().tobytes())`` is what ComfyUI itself uses,
+        # but the marker may have been loaded directly to CUDA by this node.
+        # Convert only this tiny metadata tensor back to CPU first.
+        raw = bytes(tensor.detach().to(device="cpu", dtype=torch.uint8).tolist())
+        if not raw or not raw.strip(b"\x00"):
+            return None
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _get_module_by_path(model: torch.nn.Module, module_path: str) -> torch.nn.Module:
+    """Resolve a dotted module path (including ModuleList numeric components)."""
+    module = model
+    if not module_path:
+        return module
+    for part in module_path.split('.'):
+        module = getattr(module, part)
+    return module
+
+
+def _replace_module_by_path(model: torch.nn.Module, module_path: str, replacement: torch.nn.Module) -> None:
+    """Replace a child module addressed by a dotted module path."""
+    if '.' in module_path:
+        parent_path, child_name = module_path.rsplit('.', 1)
+        parent = _get_module_by_path(model, parent_path)
+    else:
+        parent = model
+        child_name = module_path
+    setattr(parent, child_name, replacement)
+
+
+def _prepare_comfy_native_quant_linears(
+    model: torch.nn.Module,
+    state: Dict[str, torch.Tensor],
+    target_device: torch.device,
+    debug: Optional['Debug'] = None,
+) -> Dict[str, int]:
+    """
+    Backport ComfyUI-native quantized Linear checkpoint support.
+
+    Supported formats in this compatibility layer:
+      - int8_tensorwise (including SeedVR2 ConvRot INT8)
+      - nvfp4 (NVIDIA FP4 E2M1 microscaling)
+
+    These checkpoints store a tiny per-layer ``comfy_quant`` JSON marker plus
+    format-specific scale tensors. The December-2025 VideoUpscaler constructs
+    ordinary ``torch.nn.Linear`` modules, which cannot directly own packed or
+    integer quantized weights. Current ComfyUI reconstructs them through
+    ``comfy.ops.mixed_precision_ops.Linear``.
+
+    We therefore replace only Linear layers carrying a supported ``comfy_quant``
+    marker before ``load_state_dict``. Legacy FP16/FP8 safetensors and GGUF paths
+    are untouched.
+    """
+    supported_formats = {
+        'int8_tensorwise': ('weight', 'weight_scale'),
+        'nvfp4': ('weight', 'weight_scale', 'weight_scale_2'),
+    }
+
+    quantized_layers = []
+    format_counts: Dict[str, int] = {}
+    convrot_count = 0
+
+    for key, marker in state.items():
+        if not key.endswith('.comfy_quant'):
+            continue
+
+        conf = _decode_comfy_quant_config(marker)
+        if not isinstance(conf, dict):
+            continue
+
+        quant_format = conf.get('format')
+        required_suffixes = supported_formats.get(quant_format)
+        if required_suffixes is None:
+            continue
+
+        layer_name = key[:-len('.comfy_quant')]
+        missing = [suffix for suffix in required_suffixes if f"{layer_name}.{suffix}" not in state]
+        if missing:
+            raise ValueError(
+                f"Malformed ComfyUI {quant_format} checkpoint: {layer_name} is missing "
+                + ', '.join(missing)
+            )
+
+        quantized_layers.append((layer_name, conf, quant_format))
+        format_counts[quant_format] = format_counts.get(quant_format, 0) + 1
+
+        params_conf = conf.get('params', {})
+        if not isinstance(params_conf, dict):
+            params_conf = {}
+        if quant_format == 'int8_tensorwise' and conf.get('convrot', params_conf.get('convrot', False)):
+            convrot_count += 1
+
+    if not quantized_layers:
+        return {}
+
+    try:
+        import comfy.ops as comfy_ops
+    except ImportError as e:
+        raise ImportError(
+            "This SeedVR2 quantized checkpoint requires a recent ComfyUI with "
+            "comfy.ops.mixed_precision_ops and comfy-kitchen support."
+        ) from e
+
+    if not hasattr(comfy_ops, 'mixed_precision_ops'):
+        raise RuntimeError(
+            "Installed ComfyUI is too old for this SeedVR2 quantized checkpoint: "
+            "comfy.ops.mixed_precision_ops is unavailable."
+        )
+
+    # Mirror ComfyUI's native hardware gate for NVFP4 when possible.  Model
+    # materialization often happens on CPU in this node, so query ComfyUI's real
+    # execution device rather than treating CPU offload as the compute device.
+    disabled_formats = set()
+    if 'nvfp4' in format_counts:
+        try:
+            import comfy.model_management as model_management
+            compute_device = target_device
+            if getattr(compute_device, 'type', None) != 'cuda':
+                compute_device = model_management.get_torch_device()
+            if hasattr(model_management, 'supports_nvfp4_compute'):
+                if not model_management.supports_nvfp4_compute(compute_device):
+                    disabled_formats.add('nvfp4')
+        except Exception:
+            # Older ComfyUI builds may not expose the helper. Loading can still
+            # succeed; comfy-kitchen/QuantizedTensor will fall back as available.
+            pass
+
+    try:
+        mixed_ops = comfy_ops.mixed_precision_ops(
+            {}, compute_dtype=COMPUTE_DTYPE, disabled=disabled_formats
+        )
+    except TypeError:
+        # Compatibility with earlier mixed_precision_ops signatures.
+        try:
+            mixed_ops = comfy_ops.mixed_precision_ops({}, compute_dtype=COMPUTE_DTYPE)
+        except TypeError:
+            mixed_ops = comfy_ops.mixed_precision_ops({})
+
+    if not hasattr(mixed_ops, 'Linear'):
+        raise RuntimeError("ComfyUI mixed_precision_ops does not provide a Linear implementation")
+
+    # ComfyUI v0.33.1's native NVFP4 inference path dynamically quantizes
+    # activations and only accepts FP16/BF16 inputs.  The legacy SeedVR2
+    # NaDiT occasionally promotes activations to FP32 (for example around
+    # normalization/stabilization), which is harmless for ordinary Linear and
+    # INT8 weight-only paths but makes comfy-kitchen's NVFP4 quantizer fail
+    # with: "Unsupported dtype code (only FP16/BF16 supported): 0".
+    #
+    # Keep those FP32 calculations intact and cast only at the NVFP4 Linear
+    # boundary.  This mirrors the dtype expected by ComfyUI's native quantized
+    # execution without globally changing NaDiT numerics.
+    nvfp4_activation_dtype = (
+        COMPUTE_DTYPE if COMPUTE_DTYPE in (torch.float16, torch.bfloat16)
+        else torch.bfloat16
+    )
+
+    class _SeedVR2NVFP4Linear(mixed_ops.Linear):
+        def forward(self, input, *args, **kwargs):
+            if (
+                isinstance(input, torch.Tensor)
+                and input.is_floating_point()
+                and input.dtype not in (torch.float16, torch.bfloat16)
+            ):
+                input = input.to(dtype=nvfp4_activation_dtype)
+            return super().forward(input, *args, **kwargs)
+
+    replaced = 0
+
+    for layer_name, conf, quant_format in quantized_layers:
+        try:
+            old_module = _get_module_by_path(model, layer_name)
+        except (AttributeError, KeyError, IndexError) as e:
+            raise ValueError(
+                f"Quantized checkpoint layer '{layer_name}' does not exist in this SeedVR2 model architecture"
+            ) from e
+
+        if not isinstance(old_module, torch.nn.Linear):
+            raise TypeError(
+                f"Quantized checkpoint expects '{layer_name}' to be Linear, got {type(old_module).__name__}"
+            )
+
+        linear_cls = _SeedVR2NVFP4Linear if quant_format == 'nvfp4' else mixed_ops.Linear
+        replacement = linear_cls(
+            old_module.in_features,
+            old_module.out_features,
+            bias=(old_module.bias is not None),
+            device=target_device,
+            dtype=COMPUTE_DTYPE,
+        )
+        replacement.train(old_module.training)
+        _replace_module_by_path(model, layer_name, replacement)
+
+        # ComfyUI decodes comfy_quant via .numpy(). Keep only this tiny metadata
+        # tensor on CPU even when the old VideoUpscaler loads weights to CUDA.
+        marker_key = f"{layer_name}.comfy_quant"
+        state[marker_key] = state[marker_key].to('cpu')
+        replaced += 1
+
+    if debug:
+        descriptions = []
+        if format_counts.get('int8_tensorwise'):
+            descriptions.append(
+                f"INT8={format_counts['int8_tensorwise']} ({convrot_count} ConvRot)"
+            )
+        if format_counts.get('nvfp4'):
+            mode = "emulated/dequant fallback" if 'nvfp4' in disabled_formats else "native when supported"
+            descriptions.append(f"NVFP4={format_counts['nvfp4']} ({mode})")
+        debug.log(
+            f"Detected ComfyUI native quantized checkpoint: replaced {replaced} Linear layers "
+            f"with mixed-precision ops [{'; '.join(descriptions)}]",
+            category="precision",
+            force=True,
+        )
+
+    return format_counts
+
 def _load_standard_weights(model: torch.nn.Module, state: Dict[str, torch.Tensor], 
                           used_meta: bool, model_type: str, model_type_lower: str,
+                          target_device: torch.device,
                           debug: Optional['Debug'] = None) -> torch.nn.Module:
     """Load standard (non-GGUF) weights into model."""
     debug.start_timer(f"{model_type_lower}_state_apply")
+
+    # Comfy-Org native quantized checkpoints (currently INT8 ConvRot and
+    # NVFP4 here) need ComfyUI's quantized Linear implementation. This is a
+    # no-op for legacy FP16/FP8 checkpoints.
+    native_quant_formats: Dict[str, int] = {}
+    if model_type_lower == "dit":
+        native_quant_formats = _prepare_comfy_native_quant_linears(
+            model, state, target_device, debug
+        )
+
     model.load_state_dict(state, strict=False, assign=True)
-    
+
+    if native_quant_formats:
+        # Fail early if ComfyUI did not reconstruct QuantizedTensor weights.
+        failed = []
+        supported = {'int8_tensorwise', 'nvfp4'}
+        for key in state.keys():
+            if not key.endswith('.comfy_quant'):
+                continue
+            conf = _decode_comfy_quant_config(state[key])
+            if not isinstance(conf, dict) or conf.get('format') not in supported:
+                continue
+            layer_name = key[:-len('.comfy_quant')]
+            layer = _get_module_by_path(model, layer_name)
+            weight = getattr(layer, 'weight', None)
+            if weight is None or 'QuantizedTensor' not in type(weight).__name__:
+                failed.append((layer_name, conf.get('format')))
+        if failed:
+            layer_name, quant_format = failed[0]
+            raise RuntimeError(
+                f"ComfyUI {quant_format} weights were not reconstructed as QuantizedTensor. "
+                "Update ComfyUI/comfy-kitchen. First affected layer: " + layer_name
+            )
+
     action = "materialized" if used_meta else "applied"
     debug.end_timer(f"{model_type_lower}_state_apply", f"{model_type} weights {action}")
     
