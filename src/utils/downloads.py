@@ -234,8 +234,18 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
                     del cache[filename]
                     save_validation_cache(cache, cache_dir)
         
-        # Download file
-        url = HUGGINGFACE_BASE_URL.format(repo=repo, filename=filename)
+        # Download file. Registry entries may pin a revision for reproducible
+        # downloads/hashes, or provide an explicit URL override.
+        remote_filename = filename
+        if getattr(model_info, 'subfolder', None):
+            remote_filename = f"{model_info.subfolder.strip('/')}/{filename}"
+
+        explicit_url = getattr(model_info, 'download_url', None)
+        if explicit_url:
+            url = explicit_url
+        else:
+            revision = getattr(model_info, 'revision', 'main') or 'main'
+            url = f"https://huggingface.co/{repo}/resolve/{revision}/{remote_filename}"
         temp_file = f"{filepath}.download"
         
         if os.path.exists(temp_file) and debug:
@@ -276,7 +286,10 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
             if debug:
                 debug.log(f"Failed to download {filename} after {DOWNLOAD_MAX_RETRIES} attempts", 
                          level="ERROR", category="download", force=True)
-                debug.log(f"Manual download: https://huggingface.co/{repo}/blob/main/{filename}", 
+                revision = getattr(model_info, 'revision', 'main') or 'main'
+                manual_url = (getattr(model_info, 'download_url', None) or
+                              f"https://huggingface.co/{repo}/blob/{revision}/{remote_filename}")
+                debug.log(f"Manual download: {manual_url}", 
                          category="info", force=True)
                 debug.log(f"Save to: {filepath}", category="info", force=True)
             return False
