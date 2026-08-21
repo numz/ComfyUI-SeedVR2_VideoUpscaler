@@ -6,7 +6,14 @@ Configure DiT (Diffusion Transformer) model with memory optimization
 from comfy_api.latest import io
 from comfy_execution.utils import get_executing_context
 from typing import Dict, Any, Tuple
-from ..utils.model_registry import get_available_dit_models, DEFAULT_DIT
+import os
+from ..utils.model_registry import (
+    get_available_dit_models,
+    get_local_dit_models,
+    get_default_models,
+    DEFAULT_DIT,
+)
+from ..utils.constants import DIT_MODEL_TYPE, find_model_file
 from ..optimization.memory_manager import get_device_list
 
 
@@ -47,6 +54,14 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                         "DiT (Diffusion Transformer) model for video upscaling.\n"
                         "Models automatically download on first use.\n"
                         "Additional models can be added to the ComfyUI models folder."
+                    )
+                ),
+                io.Boolean.Input("local_models_only",
+                    default=False,
+                    optional=True,
+                    tooltip=(
+                        "Show only DiT models that currently exist in ComfyUI registered "
+                        "diffusion_models paths. Preset models are hidden while enabled."
                     )
                 ),
                 io.Combo.Input("device",
@@ -133,7 +148,7 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, model: str, device: str, offload_device: str = "none",
+    def execute(cls, model: str, device: str, local_models_only: bool = False, offload_device: str = "none",
                      cache_model: bool = False, blocks_to_swap: int = 0, 
                      swap_io_components: bool = False, attention_mode: str = "sdpa",
                      torch_compile_args: Dict[str, Any] = None) -> io.NodeOutput:
@@ -156,6 +171,11 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
         Raises:
             ValueError: If cache_model is enabled but offload_device is not set
         """
+        if local_models_only and model not in get_local_dit_models():
+            raise ValueError(
+                f"DiT model is not present in registered diffusion_models paths: {model}"
+            )
+
         # Validate cache_model configuration
         if cache_model and offload_device == "none":
             raise ValueError(
@@ -178,3 +198,15 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
         }
         
         return io.NodeOutput(config)
+
+    @classmethod
+    def validate_inputs(cls, model: str, local_models_only: bool = False, **kwargs) -> bool | str:
+        """Validate the selected model using ComfyUI's standard node validation hook."""
+        if local_models_only and model not in get_local_dit_models():
+            return f"DiT model is not available in registered paths: {model}"
+        if model in get_default_models("dit"):
+            return True
+        model_path = find_model_file(model, model_type=DIT_MODEL_TYPE)
+        if not os.path.isfile(model_path):
+            return f"DiT model file is missing: {model}"
+        return True

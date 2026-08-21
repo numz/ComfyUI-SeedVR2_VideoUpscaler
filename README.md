@@ -382,7 +382,14 @@ git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git custom_nodes
 
 ### Model Installation
 
-Models will be **automatically downloaded** on first use and saved to `ComfyUI/models/SEEDVR2`.
+For ComfyUI and Comfy Desktop, models use the standard registered model categories:
+
+- DiT models: `ComfyUI/models/diffusion_models/`
+- VAE models: `ComfyUI/models/vae/`
+
+When Comfy Desktop shared model paths are configured, the nodes automatically use the registered shared `diffusion_models` and `vae` paths. Standalone CLI execution without ComfyUI can still use its `./models/SEEDVR2` fallback.
+
+Models are **automatically downloaded** on first use when the selected model is not present in the registered local paths.
 
 You can also manually download models from:
 - Main models available at [numz/SeedVR2_comfyUI](https://huggingface.co/numz/SeedVR2_comfyUI/tree/main) and [AInVFX/SeedVR2_comfyUI](https://huggingface.co/AInVFX/SeedVR2_comfyUI/tree/main)
@@ -439,6 +446,8 @@ Configure the DiT (Diffusion Transformer) model for video upscaling.
     - `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors`: FP8 with last block in FP16 to reduce artifacts (good quality)
     - `seedvr2_ema_7b-Q4_K_M.gguf`: GGUF 4-bit quantized (acceptable quality)
     - `seedvr2_ema_7b_sharp_*`: Sharp variants for enhanced detail
+
+  - **local_models_only**: Hide preset model names that are not currently present in ComfyUI registered paths. When enabled, the list contains only locally available models; the default is `False`.
 
 - **device**: GPU device for DiT inference (e.g., `cuda:0`)
 
@@ -505,6 +514,8 @@ Configure the VAE (Variational Autoencoder) model for encoding/decoding video fr
 
 - **model**: VAE model selection
   - `ema_vae_fp16.safetensors`: Default and recommended
+
+- **local_models_only**: Hide preset model names that are not currently present in ComfyUI registered `vae` paths. When enabled, the list contains only locally available VAE models; the default is `False`.
 
 - **device**: GPU device for VAE inference (e.g., `cuda:0`)
 

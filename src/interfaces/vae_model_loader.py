@@ -6,7 +6,14 @@ Configure VAE (Variational Autoencoder) model with tiling support
 from comfy_api.latest import io
 from comfy_execution.utils import get_executing_context
 from typing import Dict, Any, Tuple
-from ..utils.model_registry import get_available_vae_models, DEFAULT_VAE
+import os
+from ..utils.model_registry import (
+    get_available_vae_models,
+    get_local_vae_models,
+    get_default_models,
+    DEFAULT_VAE,
+)
+from ..utils.constants import VAE_MODEL_TYPE, find_model_file
 from ..optimization.memory_manager import get_device_list
 
 
@@ -48,6 +55,14 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
                         "VAE (Variational Autoencoder) model for encoding/decoding.\n"
                         "Models automatically download on first use.\n"
                         "Additional models can be added to the ComfyUI models folder."
+                    )
+                ),
+                io.Boolean.Input("local_models_only",
+                    default=False,
+                    optional=True,
+                    tooltip=(
+                        "Show only VAE models that currently exist in ComfyUI registered "
+                        "vae paths. Preset models are hidden while enabled."
                     )
                 ),
                 io.Combo.Input("device",
@@ -162,7 +177,7 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, model: str, device: str, offload_device: str = "none",
+    def execute(cls, model: str, device: str, local_models_only: bool = False, offload_device: str = "none",
                      cache_model: bool = False, encode_tiled: bool = False,
                      encode_tile_size: int = 512, encode_tile_overlap: int = 64,
                      decode_tiled: bool = False, decode_tile_size: int = 512, 
@@ -192,6 +207,11 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
         Raises:
             ValueError: If cache_model is enabled but offload_device is invalid
         """
+        if local_models_only and model not in get_local_vae_models():
+            raise ValueError(
+                f"VAE model is not present in registered vae paths: {model}"
+            )
+
         # Validate cache_model configuration
         if cache_model and offload_device == "none":
             raise ValueError(
@@ -217,3 +237,15 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
             "node_id": get_executing_context().node_id,
         }
         return io.NodeOutput(config)
+
+    @classmethod
+    def validate_inputs(cls, model: str, local_models_only: bool = False, **kwargs) -> bool | str:
+        """Validate the selected model using ComfyUI's standard node validation hook."""
+        if local_models_only and model not in get_local_vae_models():
+            return f"VAE model is not available in registered paths: {model}"
+        if model in get_default_models("vae"):
+            return True
+        model_path = find_model_file(model, model_type=VAE_MODEL_TYPE)
+        if not os.path.isfile(model_path):
+            return f"VAE model file is missing: {model}"
+        return True

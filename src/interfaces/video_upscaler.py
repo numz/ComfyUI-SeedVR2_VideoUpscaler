@@ -6,7 +6,7 @@ Main ComfyUI node for high-quality video upscaling using diffusion models
 import torch
 from comfy_api.latest import io
 from typing import Tuple, Dict, Any, Optional
-from ..utils.constants import get_base_cache_dir, __version__
+from ..utils.constants import __version__
 from ..utils.downloads import download_weight
 from ..utils.debug import Debug
 from ..core.generation_phases import (
@@ -416,7 +416,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
             runner, cache_context = prepare_runner(
                 dit_model=dit_model, 
                 vae_model=vae_model, 
-                model_dir=get_base_cache_dir(),
+                model_dir=None,
                 debug=debug,
                 ctx=ctx,
                 dit_cache=dit_cache,

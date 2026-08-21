@@ -907,7 +907,8 @@ def _process_frames_core(
         }
     
     # Prepare runner with caching support
-    model_dir = args.model_dir if args.model_dir is not None else f"./models/{SEEDVR2_FOLDER_NAME}"
+    # Use ComfyUI's shared models directory when running inside ComfyUI.
+    model_dir = args.model_dir
     
     # Use fixed IDs for CLI caching when enabled
     dit_id = "cli_dit" if cache_dit else None
@@ -1580,7 +1581,8 @@ def main() -> None:
             debug.log(f"Using devices: {device_list}", category="device")
         
         # Download models once before processing
-        if not download_weight(dit_model=args.dit_model, vae_model=DEFAULT_VAE, model_dir=args.model_dir, debug=debug):
+        model_dir = args.model_dir
+        if not download_weight(dit_model=args.dit_model, vae_model=DEFAULT_VAE, model_dir=model_dir, debug=debug):
             debug.log("Failed to download required models. Check console output above.", level="ERROR", category="download", force=True)
             sys.exit(1)
         
