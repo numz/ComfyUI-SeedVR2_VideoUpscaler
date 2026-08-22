@@ -76,7 +76,7 @@ from ..optimization.compatibility import (
 )
 from ..optimization.blockswap import is_blockswap_enabled, validate_blockswap_config, apply_block_swap_to_dit, cleanup_blockswap
 from ..optimization.memory_manager import cleanup_dit, cleanup_vae
-from ..utils.constants import find_model_file
+from ..utils.constants import DIT_MODEL_TYPE, VAE_MODEL_TYPE, find_model_file
 
 
 def _configs_equal(config1: Optional[Dict[str, Any]], config2: Optional[Dict[str, Any]]) -> bool:
@@ -1030,7 +1030,7 @@ def _setup_dit_model(
         debug.log(f"Reusing cached DiT ({cache_context['dit_id']}): {dit_model}", 
                 category="reuse", force=True)
         runner.dit = cache_context['cached_dit']
-        runner._dit_checkpoint = find_model_file(dit_model, base_cache_dir)
+        runner._dit_checkpoint = find_model_file(dit_model, base_cache_dir, DIT_MODEL_TYPE)
         runner._dit_model_name = dit_model
         
         # Restore config attributes from model to runner (config travels with model)
@@ -1051,7 +1051,7 @@ def _setup_dit_model(
         # runner.config.dit.dtype = dit_dtype_str
         # runner._dit_dtype_override = compute_dtype
         
-        dit_checkpoint_path = find_model_file(dit_model, base_cache_dir)
+        dit_checkpoint_path = find_model_file(dit_model, base_cache_dir, DIT_MODEL_TYPE)
         runner = prepare_model_structure(runner, "dit", dit_checkpoint_path, 
                                         runner.config, debug, block_swap_config)
         runner._dit_model_name = dit_model
@@ -1103,7 +1103,7 @@ def _setup_vae_model(
         debug.log(f"Reusing cached VAE ({cache_context['vae_id']}): {vae_model}", 
                 category="reuse", force=True)
         runner.vae = cache_context['cached_vae']
-        runner._vae_checkpoint = find_model_file(vae_model, base_cache_dir)
+        runner._vae_checkpoint = find_model_file(vae_model, base_cache_dir, VAE_MODEL_TYPE)
         runner._vae_model_name = vae_model
         
         # Restore config attributes from model to runner (config travels with model)
@@ -1131,7 +1131,7 @@ def _setup_vae_model(
         runner.config.vae.dtype = vae_dtype_str
         runner._vae_dtype_override = compute_dtype
         
-        vae_checkpoint_path = find_model_file(vae_model, base_cache_dir)
+        vae_checkpoint_path = find_model_file(vae_model, base_cache_dir, VAE_MODEL_TYPE)
         runner = prepare_model_structure(runner, "vae", vae_checkpoint_path, 
                                         runner.config, debug, None)
         

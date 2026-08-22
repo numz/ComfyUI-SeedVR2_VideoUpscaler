@@ -6,7 +6,7 @@ Central registry for model definitions, repositories, and metadata
 import os
 from typing import List, Optional
 from dataclasses import dataclass
-from .constants import get_all_model_files
+from .constants import DIT_MODEL_TYPE, VAE_MODEL_TYPE, get_all_model_files
 
 # Model class imports using relative imports
 from ..models.dit_3b.nadit import NaDiT as NaDiT3B
@@ -64,28 +64,39 @@ def get_model_repo(model_name: str) -> str:
     """Get repository for a specific model"""
     return MODEL_REGISTRY.get(model_name, ModelInfo()).repo
 
-def get_available_dit_models() -> List[str]:
-    """Get all available DiT models including those discovered on disk"""
-    model_list = get_default_models("dit")
-    
+def get_local_dit_models() -> List[str]:
+    """Get DiT models registered by ComfyUI or stored in the legacy folder."""
+    # Scan first so legacy paths are registered before querying ComfyUI's cache.
+    model_list = list(get_all_model_files(DIT_MODEL_TYPE).keys())
     try:
-        # Get all model files from all paths
-        model_files = get_all_model_files()
-        
-        # Add files not in registry
-        discovered_models = [
-            filename for filename in model_files
-            if filename not in MODEL_REGISTRY
-        ]
-        
-        # Add discovered models to the list
-        model_list.extend(sorted(discovered_models))
-    except:
+        import folder_paths
+        model_list.extend(folder_paths.get_filename_list(DIT_MODEL_TYPE))
+    except Exception:
         pass
-    
-    return model_list
+    return list(dict.fromkeys(model_list))
 
-def get_available_vae_models() -> List[str]:
-    """Get all available VAE models from the registry"""
-    model_list = get_default_models("vae")
-    return model_list
+
+def get_available_dit_models(include_presets: bool = True) -> List[str]:
+    """Get preset DiT models, or all local models when presets are disabled."""
+    if not include_presets:
+        return get_local_dit_models()
+    return get_default_models("dit")
+
+
+def get_local_vae_models() -> List[str]:
+    """Get VAE models registered by ComfyUI or stored in the legacy folder."""
+    # Scan first so legacy paths are registered before querying ComfyUI's cache.
+    model_list = list(get_all_model_files(VAE_MODEL_TYPE).keys())
+    try:
+        import folder_paths
+        model_list.extend(folder_paths.get_filename_list(VAE_MODEL_TYPE))
+    except Exception:
+        pass
+    return list(dict.fromkeys(model_list))
+
+
+def get_available_vae_models(include_presets: bool = True) -> List[str]:
+    """Get preset VAE models, or all local models when presets are disabled."""
+    if not include_presets:
+        return get_local_vae_models()
+    return get_default_models("vae")

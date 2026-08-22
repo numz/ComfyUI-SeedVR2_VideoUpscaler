@@ -13,9 +13,12 @@ import time
 
 from .model_registry import MODEL_REGISTRY, DEFAULT_VAE
 from .constants import (
-    get_base_cache_dir,
+    DIT_MODEL_TYPE,
+    VAE_MODEL_TYPE,
+    get_model_dir,
     get_all_model_paths,
     find_model_file,
+    is_valid_model_path,
     get_validation_cache_path,
     HUGGINGFACE_BASE_URL,
     DOWNLOAD_CHUNK_SIZE,
@@ -165,15 +168,14 @@ def download_with_resume(url: str, filepath: str, debug=None) -> bool:
 
 def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = None, debug=None) -> bool:
     """Download SeedVR2 DiT and VAE models with integrity checking"""
-    cache_dir = model_dir or get_base_cache_dir()
-    os.makedirs(cache_dir, exist_ok=True)
-    
     files_to_download = [
-        (dit_model, MODEL_REGISTRY.get(dit_model)),
-        (vae_model, MODEL_REGISTRY.get(vae_model))
+        (dit_model, MODEL_REGISTRY.get(dit_model), DIT_MODEL_TYPE),
+        (vae_model, MODEL_REGISTRY.get(vae_model), VAE_MODEL_TYPE),
     ]
     
-    for filename, model_info in files_to_download:
+    for filename, model_info, category_type in files_to_download:
+        cache_dir = model_dir or get_model_dir(category_type)
+        os.makedirs(cache_dir, exist_ok=True)
         if not model_info:
             if debug:
                 debug.log(f"{filename} not in registry, skipping validation", 
@@ -181,23 +183,45 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
             continue
         
         # Get model type for logging
-        model_type = "VAE" if model_info.category == "vae" else "DiT"
+        display_name = "VAE" if model_info.category == "vae" else "DiT"
         
-        # Check if file exists in any registered path first
-        existing_filepath = find_model_file(filename, fallback_dir=cache_dir)
+        # Registered ComfyUI files take precedence over registry downloads.
+        # A user may intentionally keep a same-named local model with a
+        # different revision or hash.
+        registered_filepath = None
+        try:
+            import folder_paths
+            registered_filepath = folder_paths.get_full_path(category_type, filename)
+        except Exception:
+            pass
+
+        if (registered_filepath
+            and is_valid_model_path(registered_filepath, category_type)
+            and os.path.exists(registered_filepath)):
+            if debug:
+                debug.log(
+                    f"{display_name} local model selected: {registered_filepath}",
+                    category="setup",
+                )
+            continue
+
+        # Check fallback paths when no registered file exists.
+        existing_filepath = find_model_file(
+            filename, fallback_dir=cache_dir, model_type=category_type
+        )
         
         # Use existing file path if it exists, otherwise download to cache_dir
         if os.path.exists(existing_filepath):
             filepath = existing_filepath
             # Debug log: Model found
             if debug:
-                debug.log(f"{model_type} model found: {filepath}", category="setup")
+                debug.log(f"{display_name} model found: {filepath}", category="setup")
         else:
             filepath = os.path.join(cache_dir, filename)
             # Debug log: Model not found, will need to download
             if debug:
-                searched_paths = get_all_model_paths()
-                debug.log(f"{model_type} model not found: {filename}", category="setup")
+                searched_paths = get_all_model_paths(category_type)
+                debug.log(f"{display_name} model not found: {filename}", category="setup")
                 debug.log(f"Searched in {len(searched_paths)} location(s):", category="setup")
                 for i, path in enumerate(searched_paths, 1):
                     debug.log(f"[{i}] {path}", category="setup", indent_level=1)
@@ -209,7 +233,7 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
         if is_file_validated_cached(filepath, cache_dir):
             # Debug log: Model already validated (using cache)
             if debug:
-                debug.log(f"{model_type} model already validated (cache): {filepath}", category="setup")
+                debug.log(f"{display_name} model already validated (cache): {filepath}", category="setup")
             continue
         
         # File exists - validate it
@@ -220,12 +244,12 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
             if validate_file(filepath, expected_hash, cache_dir):
                 # Debug log: Model validated successfully
                 if debug:
-                    debug.log(f"{model_type} model validated successfully: {filepath}", category="setup")
+                    debug.log(f"{display_name} model validated successfully: {filepath}", category="setup")
                 continue
             else:
                 # File is corrupted
                 if debug:
-                    debug.log(f"File corrupted: {filename}, re-downloading...", 
+                    debug.log(f"{display_name} file failed validation: {filename}, re-downloading...", 
                             level="WARNING", category="download", force=True)
                 os.remove(filepath)
                 # Clear from cache
