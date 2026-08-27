@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from .mps_compat import repeat_first_frame
 from .types import MemoryState
 
 # Single GPU inference - no distributed processing needed
@@ -60,8 +61,6 @@ def cache_send_recv(tensor: List[Tensor], cache_size, times, memory=None):
     if memory is not None:
         recv_buffer = memory.to(tensor[0])
     elif times > 0:
-        tile_repeat = [1] * tensor[0].ndim
-        tile_repeat[2] = times
-        recv_buffer = torch.tile(tensor[0][:, :, :1], tile_repeat)
+        recv_buffer = repeat_first_frame(tensor[0], times)
     
     return recv_buffer

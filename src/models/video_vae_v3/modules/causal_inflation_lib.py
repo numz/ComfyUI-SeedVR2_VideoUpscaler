@@ -24,6 +24,7 @@ from torch.nn import Conv3d
 
 from .context_parallel_lib import cache_send_recv, get_cache_size
 from .global_config import get_norm_limit
+from .mps_compat import mps_safe_cat, repeat_first_frame
 from .types import MemoryState, _inflation_mode_t, _memory_device_t
 from ....common.half_precision_fixes import safe_pad_operation
 from ....optimization.memory_manager import retry_on_oom
@@ -202,7 +203,7 @@ class InflatedCausalConv3d(Conv3d):
             cache = next_cache
 
         output = retry_on_oom(
-            torch.cat,
+            mps_safe_cat,
             x,
             split_dim,
             debug=getattr(self, 'debug', None),
@@ -432,9 +433,7 @@ def extend_head(tensor: Tensor, times: int = 2, memory: Optional[Tensor] = None)
     if times == 0:
         return tensor
     else:
-        tile_repeat = [1] * tensor.ndim
-        tile_repeat[2] = times
-        return torch.cat(tensors=(torch.tile(tensor[:, :, :1], tile_repeat), tensor), dim=2)
+        return mps_safe_cat((repeat_first_frame(tensor, times), tensor), dim=2)
 
 
 def inflate_weight(weight_2d: torch.Tensor, weight_3d: torch.Tensor, inflation_mode: str):
