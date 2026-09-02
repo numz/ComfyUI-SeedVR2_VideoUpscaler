@@ -579,8 +579,14 @@ def _load_model_weights(model: torch.nn.Module, checkpoint_path: str, target_dev
     state = load_quantized_state_dict(checkpoint_path, target_device, debug)
     debug.end_timer(f"{model_type_lower}_weights_load", f"{model_type} weights loaded from file")
     
-    # Apply dtype conversion if requested
-    if override_dtype is not None:
+    # ComfyUI-quantized checkpoints (int8_convrot) need comfy's quantized Linear
+    # modules swapped in before the state dict is applied.
+    from ..optimization.compatibility import apply_comfy_quant_ops
+    quantized_layers = apply_comfy_quant_ops(model, state, target_device, debug)
+
+    # Apply dtype conversion if requested (never for quantized weights - the int8
+    # payload and its fp32 scales must reach comfy's loader untouched)
+    if override_dtype is not None and not quantized_layers:
         state = _convert_state_dtype(state, override_dtype, model_type, debug)
     
     # Log weight statistics

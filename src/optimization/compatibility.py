@@ -117,6 +117,7 @@ ensure_bitsandbytes_safe()
 
 import torch
 import os
+from collections import Counter
 
 
 # Flash/Sage Attention & Triton Compatibility Layer
@@ -170,6 +171,101 @@ except (ImportError, AttributeError, OSError):
         pass
 
 SAGE_ATTN_AVAILABLE = SAGE_ATTN_2_AVAILABLE or SAGE_ATTN_3_AVAILABLE
+
+
+def resolve_comfy_attention(mode: str):
+    """
+    Resolve a ComfyUI attention function for 'comfy' / 'comfy_kitchen' modes.
+
+    'comfy'         -> whatever ComfyUI's launch flags selected (--use-ck-attention,
+                       --use-sage-attention, --use-flash-attention, ...)
+    'comfy_kitchen' -> Comfy Kitchen INT8 attention explicitly
+
+    Returns None when ComfyUI is not importable (standalone CLI) or when the
+    requested backend is not registered.
+    """
+    try:
+        from comfy.ldm.modules.attention import get_attention_function
+    except ImportError:
+        return None
+    name = "optimized" if mode == "comfy" else "comfy_kitchen_int8"
+    return get_attention_function(name, None)
+
+
+def apply_comfy_quant_ops(model, state_dict, device, debug=None) -> int:
+    """
+    Swap nn.Linear for ComfyUI's quantized Linear on layers the checkpoint quantized.
+
+    ComfyUI ships quantized SeedVR2 checkpoints (seedvr2_*_int8_convrot) that store
+    an int8 `weight`, a `weight_scale` and a per-layer `comfy_quant` JSON blob.
+    Comfy's MixedPrecisionOps.Linear is signature-compatible with nn.Linear and
+    consumes all three in its own _load_from_state_dict, so swapping the modules
+    before load_state_dict is the whole integration - the key names in these
+    checkpoints already match this node's NaDiT.
+
+    Must be called after the state dict is loaded and before it is applied.
+    Mutates state_dict (moves the comfy_quant blobs to CPU).
+
+    Args:
+        model: Model (typically still on meta device)
+        state_dict: Checkpoint state dict (mutated)
+        device: Target device for the swapped modules
+        debug: Optional debug instance for logging
+
+    Returns:
+        Number of layers swapped (0 if this is not a quantized checkpoint)
+    """
+    if not any(k.endswith(".comfy_quant") for k in state_dict):
+        return 0
+
+    try:
+        import comfy.ops
+        import comfy.utils
+    except ImportError:
+        raise RuntimeError(
+            "This checkpoint uses ComfyUI's quantized weight format (int8/convrot) and "
+            "can only be loaded inside ComfyUI - the standalone CLI has no access to "
+            "comfy.ops. Use an fp8 or fp16 checkpoint instead."
+        )
+
+    # Activation dtype: follow the checkpoint's own unquantized weights rather than
+    # assuming fp16, so a future bf16 variant loads correctly. weight_scale is
+    # always fp32 and would skew the vote.
+    float_dtypes = Counter(
+        t.dtype for k, t in state_dict.items()
+        if torch.is_tensor(t) and t.is_floating_point() and not k.endswith("_scale")
+    )
+    compute_dtype = float_dtypes.most_common(1)[0][0] if float_dtypes else torch.float16
+
+    quant_config = comfy.utils.detect_layer_quantization(state_dict, "")
+    ops = comfy.ops.mixed_precision_ops(quant_config, compute_dtype)
+
+    # comfy reads the per-layer config with tensor.numpy(); this node loads state
+    # dicts straight to the GPU, so those blobs have to come back to the host.
+    for k in state_dict:
+        if k.endswith(".comfy_quant"):
+            state_dict[k] = state_dict[k].cpu()
+
+    swapped = 0
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, torch.nn.Linear) or f"{name}.comfy_quant" not in state_dict:
+            continue
+        parent_name, _, attr = name.rpartition(".")
+        parent = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, attr, ops.Linear(
+            module.in_features, module.out_features,
+            bias=module.bias is not None, device=device, dtype=compute_dtype,
+        ))
+        swapped += 1
+
+    # Read by _apply_torch_compile - dynamo can't trace the QuantizedTensor subclass.
+    model._comfy_quantized = True
+
+    if debug:
+        debug.log(f"ComfyUI quantized checkpoint: {swapped} Linear layers using "
+                  f"comfy.ops (compute dtype {compute_dtype})",
+                  category="precision", force=True)
+    return swapped
 
 
 def validate_attention_mode(requested_mode: str, debug=None) -> str:
@@ -279,8 +375,72 @@ def validate_attention_mode(requested_mode: str, debug=None) -> str:
         if debug:
             debug.log(error_msg, level="WARNING", category="setup", force=True)
         return 'sdpa'
-    
+
+    # ComfyUI-provided backends
+    if requested_mode in ('comfy', 'comfy_kitchen'):
+        if resolve_comfy_attention(requested_mode) is not None:
+            return requested_mode
+        error_msg = (
+            f"Cannot use '{requested_mode}' attention mode.\n"
+            "\n"
+            + ("ComfyUI is not importable (running standalone?).\n" if requested_mode == 'comfy' else
+               "Comfy Kitchen INT8 attention is not registered by this ComfyUI build.\n")
+            + "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+            "\n"
+            "To fix this issue:\n"
+            "  1. Run inside ComfyUI with a Comfy Kitchen build (launch with --use-ck-attention)\n"
+            "  2. OR change attention_mode to 'sdpa' (default, always available)"
+        )
+        if debug:
+            debug.log(error_msg, level="WARNING", category="setup", force=True)
+        return 'sdpa'
+
     return requested_mode
+
+
+@torch._dynamo.disable
+def call_comfy_attn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, attention_mode='comfy', **kwargs):
+    """
+    Varlen adapter for ComfyUI's dense attention functions.
+
+    ComfyUI attention takes batched (b, heads, seq, dim) tensors, SeedVR2 uses
+    packed (total_seq, heads, dim) + cu_seqlens. Block-diagonal varlen attention
+    is equivalent to independent per-sequence attention, so mask=None is correct.
+
+    Args:
+        q, k, v: Packed tensors (total_seq, heads, head_dim)
+        cu_seqlens_q/k: Cumulative sequence lengths
+        attention_mode: 'comfy' (follow ComfyUI launch flags) or 'comfy_kitchen'
+
+    Returns:
+        Attention output (total_seq, heads, head_dim)
+    """
+    attn = resolve_comfy_attention(attention_mode)
+    if attn is None:
+        raise ImportError(f"ComfyUI attention backend '{attention_mode}' is not available")
+
+    heads = q.shape[1]
+    lens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).tolist()
+    lens_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).tolist()
+
+    # Fast path: uniform segments (the common case, incl. batch of 1) -> one
+    # batched call instead of a Python loop over windows.
+    if len(set(lens_q)) == 1 and lens_q == lens_k:
+        b = len(lens_q)
+        qb, kb, vb = (t.reshape(b, -1, heads, t.shape[-1]).transpose(1, 2) for t in (q, k, v))
+        out = attn(qb, kb, vb, heads, skip_reshape=True, skip_output_reshape=True)
+        return out.transpose(1, 2).reshape(-1, heads, out.shape[-1])
+
+    outputs = []
+    for q_i, k_i, v_i in zip(torch.split(q, lens_q), torch.split(k, lens_k), torch.split(v, lens_k)):
+        out = attn(
+            q_i.transpose(0, 1).unsqueeze(0),
+            k_i.transpose(0, 1).unsqueeze(0),
+            v_i.transpose(0, 1).unsqueeze(0),
+            heads, skip_reshape=True, skip_output_reshape=True,
+        )
+        outputs.append(out.squeeze(0).transpose(0, 1))
+    return torch.cat(outputs, dim=0)
 
 
 @torch._dynamo.disable
@@ -648,31 +808,30 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
     sage_status = "✅" if SAGE_ATTN_AVAILABLE else "❌"
     flash_status = "✅" if FLASH_ATTN_AVAILABLE else "❌"
     triton_status = "✅" if TRITON_AVAILABLE else "❌"
-    
-    # Count available optimizations
-    available = [SAGE_ATTN_AVAILABLE, FLASH_ATTN_AVAILABLE, TRITON_AVAILABLE]
-    num_available = sum(available)
-    
-    if num_available == 3:
-        print(f"⚡ SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
-    elif num_available == 0:
-        print(f"⚠️  SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
-        print("💡 For best performance: pip install sageattention flash-attn triton")
-    else:
-        icon = "⚡" if num_available >= 2 else "⚠️ "
-        print(f"{icon} SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
-        
-        # Build install suggestions for missing packages
-        missing = []
+    ck_status = "✅" if resolve_comfy_attention("comfy_kitchen") is not None else "❌"
+
+    status_line = (f"SeedVR2 optimizations check: SageAttention {sage_status} | "
+                   f"Flash Attention {flash_status} | Comfy Kitchen {ck_status} | Triton {triton_status}")
+
+    num_available = sum([SAGE_ATTN_AVAILABLE, FLASH_ATTN_AVAILABLE,
+                         ck_status == "✅", TRITON_AVAILABLE])
+    print(f"{'⚡' if num_available >= 2 else '⚠️ '} {status_line}")
+
+    # Comfy Kitchen is the fastest attention backend available here and ships
+    # with the ComfyUI build, so don't suggest installing attention packages
+    # when it's present - Triton is for torch.compile and always worth having.
+    missing = []
+    if ck_status == "❌":
         if not SAGE_ATTN_AVAILABLE:
             missing.append("sageattention")
         if not FLASH_ATTN_AVAILABLE:
             missing.append("flash-attn")
-        if not TRITON_AVAILABLE:
-            missing.append("triton")
-        if missing:
-            print(f"💡 Optional: pip install {' '.join(missing)}")
-    
+    if not TRITON_AVAILABLE:
+        missing.append("triton")
+    if missing:
+        print(f"💡 Optional: pip install {' '.join(missing)}")
+
+
     # Conv3d workaround status (if applicable)
     if NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND:
         torch_ver = torch.__version__.split('+')[0]

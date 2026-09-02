@@ -184,7 +184,9 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
         'flash_attn_2': 'Flash Attention 2',
         'flash_attn_3': 'Flash Attention 3',
         'sageattn_2': 'SageAttention 2',
-        'sageattn_3': 'SageAttention 3 (Blackwell)'
+        'sageattn_3': 'SageAttention 3 (Blackwell)',
+        'comfy': 'ComfyUI active backend',
+        'comfy_kitchen': 'Comfy Kitchen INT8'
     }
     
     return mode_descriptions.get(attention_mode, attention_mode)
@@ -1370,6 +1372,13 @@ def _apply_torch_compile(model: torch.nn.Module, compile_args: Dict[str, Any],
     Returns:
         Compiled model, or original model if compilation fails
     """
+    # comfy.ops wraps quantized weights in a QuantizedTensor subclass that dynamo
+    # can't trace, and compiling around it silently falls back to eager anyway.
+    if getattr(getattr(model, 'dit_model', model), '_comfy_quantized', False):
+        debug.log(f"Skipping torch.compile for {model_type}: ComfyUI-quantized weights "
+                  "are not traceable", level="WARNING", category="setup", force=True)
+        return model
+
     try:
         # Configure compilation settings
         settings, _ = _configure_torch_compile(compile_args, model_type, debug)
