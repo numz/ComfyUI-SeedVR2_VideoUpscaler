@@ -117,6 +117,7 @@ ensure_bitsandbytes_safe()
 
 import torch
 import os
+from collections import Counter
 
 
 # Flash/Sage Attention & Triton Compatibility Layer
@@ -189,6 +190,82 @@ def resolve_comfy_attention(mode: str):
         return None
     name = "optimized" if mode == "comfy" else "comfy_kitchen_int8"
     return get_attention_function(name, None)
+
+
+def apply_comfy_quant_ops(model, state_dict, device, debug=None) -> int:
+    """
+    Swap nn.Linear for ComfyUI's quantized Linear on layers the checkpoint quantized.
+
+    ComfyUI ships quantized SeedVR2 checkpoints (seedvr2_*_int8_convrot) that store
+    an int8 `weight`, a `weight_scale` and a per-layer `comfy_quant` JSON blob.
+    Comfy's MixedPrecisionOps.Linear is signature-compatible with nn.Linear and
+    consumes all three in its own _load_from_state_dict, so swapping the modules
+    before load_state_dict is the whole integration - the key names in these
+    checkpoints already match this node's NaDiT.
+
+    Must be called after the state dict is loaded and before it is applied.
+    Mutates state_dict (moves the comfy_quant blobs to CPU).
+
+    Args:
+        model: Model (typically still on meta device)
+        state_dict: Checkpoint state dict (mutated)
+        device: Target device for the swapped modules
+        debug: Optional debug instance for logging
+
+    Returns:
+        Number of layers swapped (0 if this is not a quantized checkpoint)
+    """
+    if not any(k.endswith(".comfy_quant") for k in state_dict):
+        return 0
+
+    try:
+        import comfy.ops
+        import comfy.utils
+    except ImportError:
+        raise RuntimeError(
+            "This checkpoint uses ComfyUI's quantized weight format (int8/convrot) and "
+            "can only be loaded inside ComfyUI - the standalone CLI has no access to "
+            "comfy.ops. Use an fp8 or fp16 checkpoint instead."
+        )
+
+    # Activation dtype: follow the checkpoint's own unquantized weights rather than
+    # assuming fp16, so a future bf16 variant loads correctly. weight_scale is
+    # always fp32 and would skew the vote.
+    float_dtypes = Counter(
+        t.dtype for k, t in state_dict.items()
+        if torch.is_tensor(t) and t.is_floating_point() and not k.endswith("_scale")
+    )
+    compute_dtype = float_dtypes.most_common(1)[0][0] if float_dtypes else torch.float16
+
+    quant_config = comfy.utils.detect_layer_quantization(state_dict, "")
+    ops = comfy.ops.mixed_precision_ops(quant_config, compute_dtype)
+
+    # comfy reads the per-layer config with tensor.numpy(); this node loads state
+    # dicts straight to the GPU, so those blobs have to come back to the host.
+    for k in state_dict:
+        if k.endswith(".comfy_quant"):
+            state_dict[k] = state_dict[k].cpu()
+
+    swapped = 0
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, torch.nn.Linear) or f"{name}.comfy_quant" not in state_dict:
+            continue
+        parent_name, _, attr = name.rpartition(".")
+        parent = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, attr, ops.Linear(
+            module.in_features, module.out_features,
+            bias=module.bias is not None, device=device, dtype=compute_dtype,
+        ))
+        swapped += 1
+
+    # Read by _apply_torch_compile - dynamo can't trace the QuantizedTensor subclass.
+    model._comfy_quantized = True
+
+    if debug:
+        debug.log(f"ComfyUI quantized checkpoint: {swapped} Linear layers using "
+                  f"comfy.ops (compute dtype {compute_dtype})",
+                  category="precision", force=True)
+    return swapped
 
 
 def validate_attention_mode(requested_mode: str, debug=None) -> str:
