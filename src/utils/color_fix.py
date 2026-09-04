@@ -474,51 +474,118 @@ def _lab_to_rgb_batch(lab: Tensor, device: torch.device, matrix_inv: Tensor, eps
     return torch.clamp(rgb, 0.0, 1.0)
 
 
-def _histogram_matching_channel(source: Tensor, reference: Tensor, device: torch.device) -> Tensor:
+# CUDA's sort kernel indexes its sorted dimension with a 32-bit int, so a
+# single call cannot exceed INT_MAX elements (confirmed on torch 2.9.1+cu130:
+# "RuntimeError: The dimension being sorted can not have more than INT_MAX
+# elements."). CPU's sort has no such limit (confirmed: sorts 2**31+ elements
+# fine there). LAB color correction pools B*H*W pixels into one sort, which
+# high resolution + large batch_size can exceed on CUDA (issue #522).
+_MAX_SORT_ELEMENTS = 2**31 - 1
+
+
+def _safe_frames_per_chunk(elements_per_frame: int, dtype: torch.dtype, device: torch.device) -> int:
     """
-    Match histogram of source channel to reference using CDF mapping.
-    
-    Args:
-        source: Source channel tensor [B, H, W]
-        reference: Reference channel tensor [B, H, W]
-        
-    Returns:
-        Matched channel tensor [B, H, W]
+    How many frames' worth of pixels a single torch.sort call can handle
+    without hitting CUDA's INT_MAX element limit or running its sort
+    workspace (observed ~4.6x the input tensor's own size for a 4.3GB fp16
+    probe) out of GPU memory (issue #522).
+
+    Deliberately based on total device memory, not currently-free memory:
+    lab_color_transfer calls this three times per frame batch (L, a, b
+    channels) with different amounts already allocated by the time each runs,
+    and this repo treats identical output for identical input as a contract
+    (see set_seed / issue #385) - a free-memory-based cap would make chunk
+    boundaries, and therefore pixel values, depend on incidental VRAM
+    pressure instead of only on the input.
     """
+    if device.type != "cuda":
+        return 1 << 40  # CPU sort has no 32-bit dimension limit; effectively "never chunk"
+
+    total_bytes = torch.cuda.get_device_properties(device).total_memory
+    workspace_multiplier = 8  # cushion above the ~4.6x observed
+    usable_bytes = (total_bytes * 0.1) / workspace_multiplier
+    bytes_per_element = torch.empty(0, dtype=dtype).element_size()
+    elements_by_memory = max(1, int(usable_bytes / bytes_per_element))
+
+    frames_by_memory = max(1, elements_by_memory // elements_per_frame)
+    frames_by_correctness = max(1, _MAX_SORT_ELEMENTS // elements_per_frame)
+    return min(frames_by_memory, frames_by_correctness)
+
+
+def _match_channel_to_sorted_reference(source: Tensor, reference_sorted: Tensor, n_reference: int) -> Tensor:
+    """Histogram-match one chunk of source frames against an already-sorted
+    reference distribution (see _histogram_matching_channel)."""
     original_shape = source.shape
-    
-    # Flatten
+
     source_flat = source.flatten()
-    reference_flat = reference.flatten()
-    
-    # Sort both arrays
     source_sorted, source_indices = torch.sort(source_flat)
-    reference_sorted, _ = torch.sort(reference_flat)
-    del reference_flat
-    
-    # Quantile mapping
-    n_source = len(source_sorted)
-    n_reference = len(reference_sorted)
-    
+    del source_flat
+    n_source = source_sorted.numel()
+    del source_sorted
+
     if n_source == n_reference:
         matched_sorted = reference_sorted
     else:
-        # Interpolate reference to match source quantiles
-        source_quantiles = torch.linspace(0, 1, n_source, device=device)
-        ref_indices = (source_quantiles * (n_reference - 1)).long()
-        ref_indices.clamp_(0, n_reference - 1)
-        matched_sorted = reference_sorted[ref_indices]
-        del source_quantiles, ref_indices, reference_sorted
-    
-    del source_sorted, source_flat
-    
+        # Interpolate reference to match source quantiles, in integer
+        # arithmetic rather than a float32 linspace: at the chunk sizes this
+        # branch now routinely handles (~10**8 elements), float32's ~1.2e-7
+        # epsilon near 1.0 would collapse dozens of consecutive high-end
+        # source ranks onto the same reference index, flattening highlights
+        # and extreme chroma. Runs on reference_sorted's device: CPU when the
+        # reference was too large to sort on CUDA (see caller), otherwise the
+        # original GPU device.
+        ranks = torch.arange(n_source, device=reference_sorted.device)
+        ref_indices = ranks * (n_reference - 1) // max(1, n_source - 1)
+        del ranks
+        matched_sorted = reference_sorted[ref_indices].to(source.device)
+        del ref_indices
+
     # Reconstruct using argsort (portable across CUDA/ROCm/MPS)
     inverse_indices = torch.argsort(source_indices)
     del source_indices
     matched_flat = matched_sorted[inverse_indices]
     del matched_sorted, inverse_indices
-    
+
     return matched_flat.reshape(original_shape)
+
+
+def _histogram_matching_channel(source: Tensor, reference: Tensor, device: torch.device) -> Tensor:
+    """
+    Match histogram of source channel to reference using CDF mapping.
+
+    Args:
+        source: Source channel tensor [B, H, W]
+        reference: Reference channel tensor [B, H, W]
+
+    Returns:
+        Matched channel tensor [B, H, W]
+    """
+    b, h, w = source.shape
+    elements_per_frame = h * w
+
+    # Sort the full reference distribution once, regardless of how source
+    # gets chunked below, so every chunk maps into the exact same target CDF -
+    # chunking source without this would give each chunk its own partial
+    # reference and produce a visible color shift at chunk boundaries.
+    # Route a reference bigger than CUDA's sort limit through CPU (see
+    # _MAX_SORT_ELEMENTS above) so its full size never has to be GPU-resident.
+    reference_flat = reference.flatten()
+    if reference_flat.is_cuda and reference_flat.numel() > _MAX_SORT_ELEMENTS:
+        reference_sorted, _ = torch.sort(reference_flat.cpu())
+    else:
+        reference_sorted, _ = torch.sort(reference_flat)
+    del reference_flat
+    n_reference = reference_sorted.numel()
+
+    frames_per_chunk = _safe_frames_per_chunk(elements_per_frame, source.dtype, source.device)
+    if b <= frames_per_chunk:
+        # Common case: fits in one sort, identical to the pre-#522-fix code path.
+        return _match_channel_to_sorted_reference(source, reference_sorted, n_reference)
+
+    return torch.cat([
+        _match_channel_to_sorted_reference(source[start:start + frames_per_chunk], reference_sorted, n_reference)
+        for start in range(0, b, frames_per_chunk)
+    ], dim=0)
 
 
 def hsv_saturation_histogram_match(content_feat: Tensor, style_feat: Tensor, debug: Optional['Debug'] = None) -> Tensor:
