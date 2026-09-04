@@ -332,8 +332,19 @@ def extract_frames_from_image(image_path: str) -> Tuple[torch.Tensor, float]:
     else:
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     
-    # Convert to float32 and normalize
-    frame = frame.astype(np.float32) / 255.0
+    # Convert to float32 and normalize by the actual bit depth. cv2.IMREAD_UNCHANGED
+    # preserves the source file's native depth - not just uint8/uint16 PNGs but
+    # also int16/int32 TIFFs (IMAGE_EXTENSIONS includes .tif/.tiff) - hardcoding
+    # /255.0 silently left anything wider than 8-bit that many times too bright,
+    # clipping to solid white after the pipeline's [0,1] clamp (issue #513 -
+    # misreported as an RGBA/alpha bug since many transparent PNG exports happen
+    # to be 16-bit, but reproduces identically for a 16-bit RGB image with no
+    # alpha channel at all). Float-valued sources (e.g. float32 TIFF/EXR-style
+    # data) are assumed already scaled and are left for the pipeline's clamp.
+    if np.issubdtype(frame.dtype, np.integer):
+        frame = frame.astype(np.float32) / np.iinfo(frame.dtype).max
+    else:
+        frame = frame.astype(np.float32)
     
     # Convert to tensor [1, H, W, C]
     frames_tensor = torch.from_numpy(frame[None, ...]).to(torch.float16)
