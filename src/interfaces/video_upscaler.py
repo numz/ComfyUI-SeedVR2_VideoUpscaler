@@ -77,7 +77,10 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                 io.Int.Input("seed",
                     default=42,
                     min=0,
-                    max=2**32 - 1,
+                    # Matches ComfyUI core nodes' seed range (e.g. KSampler); previously
+                    # capped at 2**32-1, which also broke on numpy's stricter seed range
+                    # for any value above it (issue #385).
+                    max=0xffffffffffffffff,
                     step=1,
                     tooltip=(
                         "Random seed for reproducible generation (default: 42).\n"

@@ -14,7 +14,6 @@
 
 import random
 from typing import Optional
-import numpy as np
 import torch
 
 from .distributed import get_global_rank
@@ -24,7 +23,11 @@ def set_seed(seed: Optional[int], same_across_ranks: bool = False):
     """Function that sets the seed for pseudo-random number generators."""
     if seed is not None:
         seed += get_global_rank() if not same_across_ranks else 0
+        # ComfyUI's seed widget (and this repo's, since issue #385) allows the
+        # full 64-bit range (0..0xffffffffffffffff), and callers add offsets on
+        # top (e.g. generation_phases.py seed+1_000_000). Wrap into that range so
+        # torch.manual_seed (which only accepts up to 2**64-1) never overflows.
+        seed &= 0xFFFFFFFFFFFFFFFF
         random.seed(seed)
-        np.random.seed(seed)
         torch.manual_seed(seed)
 
