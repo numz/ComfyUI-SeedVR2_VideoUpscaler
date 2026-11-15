@@ -1,6 +1,6 @@
 # ComfyUI-SeedVR2_VideoUpscaler
 
-[![View Code](https://img.shields.io/badge/📂_View_Code-GitHub-181717?style=for-the-badge&logo=github)](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
+[![View Code](https://img.shields.io/badge/📂_View_Code-GitHub-181717?style=for-the-badge&logo=github)](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) [![Run on swm cloud](https://img.shields.io/badge/☁️_Run_on-swm_cloud-0F766E?style=for-the-badge)](https://cloud.swmgpu.com/w/samofvaani/video-upscale-restore)
 
 Official release of [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) for ComfyUI that enables high-quality video and image upscaling.
 
