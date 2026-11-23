@@ -156,12 +156,18 @@ class Upsample3D(Upsample2D):
             hidden_states = hidden_states[0]
 
         if self.use_conv:
+            conv = self.conv if self.name == "conv" else self.Conv2d_0
+            # The causal conv stores this chunk's tail in conv.memory (the context for the NEXT chunk) and rewrites
+            # the list of slices it is given BEFORE the convolution that can run out of memory. A retry must start
+            # from the same state, or it convolves with the wrong temporal context and returns a wrong chunk silently.
+            saved_memory = getattr(conv, "memory", None)
+            inputs = hidden_states
+
             def apply_conv():
-                if self.name == "conv":
-                    return self.conv(hidden_states, memory_state=memory_state)
-                else:
-                    return self.Conv2d_0(hidden_states, memory_state=memory_state)
-            
+                conv.memory = saved_memory
+                x = list(inputs) if isinstance(inputs, list) else inputs
+                return conv(x, memory_state=memory_state)
+
             hidden_states = retry_on_oom(
                 apply_conv,
                 debug=getattr(self, 'debug', None),
