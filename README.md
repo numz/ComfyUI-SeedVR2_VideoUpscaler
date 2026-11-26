@@ -1,5 +1,31 @@
 # ComfyUI-SeedVR2_VideoUpscaler
 
+> [!IMPORTANT]
+> **ComfyUI has supported SeedVR2 natively since [v0.28.0](https://github.com/Comfy-Org/ComfyUI/releases/tag/v0.28.0) (July 2026), so this repository is no longer maintained.** Version 2.5.24 (December 2025) is the last release of this custom node.
+>
+> **To switch:** update ComfyUI, open the Template Library and search for SeedVR2. These three templates use the native nodes:
+>
+> - [Video Upscale: SeedVR2 3B Int8](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/utility_seedvr2_3b_int8_upscale_video.json)
+> - [Image Upscale: SeedVR2 3B Int8](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/utility_seedvr2_3b_int8_upscale_image.json)
+> - [Image Upscale: SeedVR2 7B Int8](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/utility_seedvr2_7b_int8_upscale_image.json)
+>
+> The older "Image Upscale: SeedVR2" and "Video Upscale: SeedVR2" templates still use this custom node. The official guide is [SeedVR2: Image and video upscaling in ComfyUI](https://docs.comfy.org/tutorials/utility/seedvr2), and the models are on [Comfy-Org/SeedVR2](https://huggingface.co/Comfy-Org/SeedVR2).
+>
+> This page, the code and the model files stay online for existing workflows.
+
+**Thank you** to everyone who tested this node, reported bugs, sent pull requests, shared GGUF models and helped others in Discussions. Many of you are named in [Credits](#-credits). Thank you to ByteDance Seed for releasing SeedVR2 under Apache 2.0 and for linking this node from their repository. Thank you to the ComfyUI team for the native nodes.
+
+*NumZ and AInVFX*
+
+**More from AInVFX.** [AInVFX](https://www.ainvfx.com/) is a collective of VFX and AI specialists. It brings artificial intelligence to visual effects and animation, the human way: ComfyUI courses, AI consulting and open-source tools.
+
+- [SeedVR2 for ComfyUI](https://www.ainvfx.com/blog/seedvr2-v2-5-the-complete-redesign-that-makes-7b-models-run-on-8gb-gpus/): native nodes or this custom node, which model to pick, VRAM and settings
+- [ComfyUI for VFX](https://www.ainvfx.com/comfyui-for-vfx/): a guide for artists and studios
+- [AI VFX Masterclass](https://www.ainvfx.com/masterclass/) and [AI VFX Bootcamp](https://www.ainvfx.com/bootcamp/): live, hands-on ComfyUI courses for film and TV
+- [Open-source ComfyUI tools](https://www.ainvfx.com/open-source/), such as Paint a plate, ainvfx-fluid and ainvfx-runpod
+
+---
+
 [![View Code](https://img.shields.io/badge/📂_View_Code-GitHub-181717?style=for-the-badge&logo=github)](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
 
 Official release of [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) for ComfyUI that enables high-quality video and image upscaling.
@@ -14,7 +40,6 @@ Can run as **Multi-GPU standalone CLI** too, see [🖥️ Run as Standalone](#-r
 
 ## 📋 Quick Access
 
-- [🆙 Future Work](#-future-work)
 - [🚀 Release Notes](#-release-notes)
 - [🎯 Features](#-features)
 - [🔧 Requirements](#-requirements)
@@ -25,14 +50,6 @@ Can run as **Multi-GPU standalone CLI** too, see [🖥️ Run as Standalone](#-r
 - [🤝 Contributing](#-contributing)
 - [🙏 Credits](#-credits)
 - [📜 License](#-license)
-
-## 🆙 Future Work
-
-We're actively working on improvements and new features. To stay informed:
-
-- **📌 Track Active Development**: Visit [Issues](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/issues) to see active development, report bugs, and request new features
-- **💬 Join the Community**: Learn from others, share your workflows, and get help in the [Discussions](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/discussions)
-- **🔮 Next Model Survey**: We're looking for community input on the next open-source super-powerful generic restoration model. Share your suggestions in [Issue #164](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/issues/164)
 
 ## 🚀 Release Notes
 
@@ -1024,27 +1041,13 @@ Result: Frames 0-99 with smooth blending at the transition point
 
 ## 🤝 Contributing
 
-Contributions are welcome! We value community input and improvements.
+This repository stays online as a reference for existing workflows. It no longer accepts contributions. Pull requests and issues are no longer reviewed.
 
-For detailed contribution guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-**Quick Start:**
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request to the **main** branch
-
-**Get Help:**
-- YouTube: [AInVFX Channel](https://www.youtube.com/@AInVFX)
-- GitHub [Issues](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/issues): For bug reports and feature requests
-- GitHub [Discussions](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/discussions): For questions and community support
-- Discord: adrientoupet & NumZ#7184
+For SeedVR2 in ComfyUI, use the native nodes. The [official guide](https://docs.comfy.org/tutorials/utility/seedvr2) covers the templates, the models and troubleshooting.
 
 ## 🙏 Credits
 
-This ComfyUI implementation is a collaborative project by **[NumZ](https://github.com/numz)** and **[AInVFX](https://www.youtube.com/@AInVFX)** (Adrien Toupet), based on the original [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) by ByteDance Seed Team.
+This ComfyUI implementation is a collaborative project by **[NumZ](https://github.com/numz)** and **[AInVFX](https://www.ainvfx.com/)** (Adrien Toupet), based on the original [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) by ByteDance Seed Team.
 
 Special thanks to our community contributors including [naxci1](https://github.com/naxci1), [thehhmdb](https://github.com/thehhmdb), [s-cerevisiae](https://github.com/s-cerevisiae), [benjaminherb](https://github.com/benjaminherb), [cmeka](https://github.com/cmeka), [FurkanGozukara](https://github.com/FurkanGozukara), [JohnAlcatraz](https://github.com/JohnAlcatraz), [lihaoyun6](https://github.com/lihaoyun6), [Luchuanzhao](https://github.com/Luchuanzhao), [Luke2642](https://github.com/Luke2642), [proxyid](https://github.com/proxyid), [q5sys](https://github.com/q5sys), and many others for their improvements, bug fixes, and testing.
 
